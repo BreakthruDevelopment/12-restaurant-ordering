@@ -175,6 +175,13 @@ describe("allergen router: only a whole-question allowlist reaches general mode"
     expect(routeQuestion("what do you have").mode).toBe("allergen");
     expect(routeQuestion("under 15").mode).toBe("general");
   });
+  it("recommendation words are not time words: sellers, specials and 'pick' get dish suggestions", () => {
+    for (const q of ["What are your best sellers?", "What are today's specials?", "What should I pick?", "pickup picks", "what's the best pickup"]) expect(isTimeQuestion(q), q).toBe(false);
+    for (const q of ["What are your best sellers?", "What are today's specials?", "What should I pick?"]) expect(routeQuestion(q).mode, q).toBe("general");
+  });
+  it("ingredient questions are caught by structure before the vocabulary check", () => {
+    for (const q of ["What spices are in the soup?", "Which spices are in the soup?", "what goes into the sauce", "which herbs are in the noodles"]) expect(routeQuestion(q, { menuWords }).mode, q).toBe("allergen");
+  });
   it("recognises wait-time and opening-hours questions", () => {
     for (const q of ["how long is the wait", "what time do you open", "pickup time?", "opening hours"]) expect(isTimeQuestion(q)).toBe(true);
     expect(isTimeQuestion("what's popular")).toBe(false);

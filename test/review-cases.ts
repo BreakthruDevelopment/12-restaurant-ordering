@@ -36,6 +36,7 @@ export const CONSTRAINT_QUESTIONS: string[] = [
 export const ROUND3_QUESTIONS: string[] = [
   "my son carries an auto-injector, what do you recommend", "my son carries an autoinjector what is good", "is there paneer in the curry", "is there dashi in the soup",
   "is there miso in it", "is there semolina in the pasta", "is there barley in the soup", "does the soup have barley", "any barley in the soup", "have any couscous?",
+  "What spices are in the soup?", "Which spices are in the soup?", "what herbs are in the curry", "which sauces are on the noodles in the bowl", "what goes into the sauce", "what goes in the soup",
   "are there peanuts", "does it have bread", "do they have any rye", "what's in the custard tart", "is the paneer curry made with cream",
   ..."epinephrine adrenaline injector auvi epipen paneer ricotta mozzarella parmesan feta custard meringue aioli brioche dashi bonito miso edamame tempeh tamari shoyu semolina couscous seitan spelt barley rye malt bulgur durum panko bread pasta batter tempura chestnut buckwheat problem condition doctor medical stomach diet vegan keto halal kosher pregnant FODMAP IBS".split(" "),
   // false positives the reviewers saw: acceptable, they go to ask-staff
@@ -49,6 +50,7 @@ export const ROUND3_QUESTIONS: string[] = [
 export const GENERAL_QUESTIONS: string[] = [
   "spicy?", "under $15", "what's popular?", "what's spicy", "cheapest", "dessert", "drinks", "kids", "kid friendly?", "Anything spicy under $15?",
   "what's the best dessert", "what drinks do you have", "what do you recommend", "what's the most popular dish", "something quick and cheap", "what's good to share",
+  "What are your best sellers?", "What are today's specials?", "What should I pick?",
 ];
 
 /** Model answers that make or smuggle a claim: none may come back as `general` or `demo` model text. */

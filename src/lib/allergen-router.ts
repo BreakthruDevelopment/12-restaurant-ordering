@@ -162,6 +162,9 @@ const LEXICON: readonly Term[] = [
   { t: "can", re: /\bcan \w+(?: \w+)? eat\b/ },
   // "is there ...", "does it have ...", "any X in ...", "have any ...": a question about what is in a dish is an ingredient question
   { t: "is there", re: /\b(?:is|are) there\b/ }, { t: "does have", re: /\b(?:does|did)\b.*\bhave\b/ }, { t: "has any", re: /\b(?:have|has|having) any\b/ },
+  // ingredient questions by structure, before any vocabulary check: "what spices are in the soup", "which X is in", "what goes into"
+  { t: "what noun is in", re: /\b(?:what|which)\b(?: \w+){1,3} (?:is|are) in\b/ }, { t: "what in the", re: /\b(?:what|which)\b.*\bin (?:the|this|that|your|our|a|an)\b/ },
+  { t: "goes into", re: /\bgoes (?:in|into|on)\b|\bgo (?:in|into|on)\b/ },
   { t: "any in", re: /\bany\b.*\b(?:in|inside)\b/ },
   // ingredient questions ("what comes with" stays general)
   ...group([], "ingredient recipe whats_in what_is_in whats_inside what_is_inside made_with made_of made_from made_using contents"),
@@ -265,9 +268,10 @@ const GENERAL_VOCAB = new Set(
     "spicy spice spices hot mild milder cheap cheaper cheapest budget affordable under below price prices cost costs expensive quick quickly fast faster kid kids child children friendly share sharing shareable " +
     "dessert desserts sweet sweets drink drinks beverage beverages tea coffee starter starters appetizer appetizers main mains entree entrees side sides soup soups noodle noodles rice bowl bowls salad salads " +
     "lunch dinner meal meals dish dishes menu food light filling big small portion portions good great nice tasty delicious try order ordering " +
-    "seller sellers todays wait waiting long ready pickup pick open opening hours close closing closes time minutes minute lighter").split(" "),
+    "seller sellers todays wait waiting long ready pickup pick open opening hours close closing closes when time times minutes minute lighter").split(" "),
 );
-const TIME_WORDS = new Set("seller sellers todays wait waiting long ready pickup pick open opening hours close closing closes time minutes minute".split(" "));
+/** Only real time wording: "pick", "pickup", "sellers", "specials" and the like are recommendation words, not time words. */
+const TIME_WORDS = new Set("wait waiting long ready open opening hours close closing closes when time times minutes minute".split(" "));
 
 const stem = (t: string): string[] => [t, t.replace(/(?:es|s)$/, "")];
 
