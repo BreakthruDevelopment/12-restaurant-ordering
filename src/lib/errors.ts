@@ -3,6 +3,8 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Optional machine-readable extras for the client (for example which items are sold out). Never secrets. */
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = new.target.name;
@@ -17,8 +19,8 @@ export class NotFoundError extends HttpError {
 
 /** The request is well formed but conflicts with the current state (a stale update, a cap reached). */
 export class ConflictError extends HttpError {
-  constructor(message = "That change isn't allowed from the current state.") {
-    super(409, message);
+  constructor(message = "That change isn't allowed from the current state.", details?: unknown) {
+    super(409, message, details);
   }
 }
 

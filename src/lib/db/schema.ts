@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, date, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, date, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
 // Auth tables (shape required by Better Auth with the admin plugin).
@@ -69,22 +69,194 @@ export const verification = pgTable("verification", {
 });
 
 // ---------------------------------------------------------------------------
-// Example domain table. Each app replaces this with its own entities, keeping
-// the ownerId pattern so per-user access control stays enforceable in SQL.
+// Restaurant domain (spec 12). One restaurant per deployment.
 // ---------------------------------------------------------------------------
 
-export const item = pgTable(
-  "item",
+/** US nine majors plus gluten (spec: no EU-14 list). Declarations are structured, never free text. */
+export const ALLERGENS = ["milk", "egg", "fish", "crustacean_shellfish", "tree_nuts", "peanuts", "wheat", "soy", "sesame", "gluten"] as const;
+export type Allergen = (typeof ALLERGENS)[number];
+export const ALLERGEN_LEVELS = ["contains", "may_contain"] as const;
+export type AllergenLevel = (typeof ALLERGEN_LEVELS)[number];
+export const DIETARY_TAGS = ["vegetarian", "vegan", "spicy"] as const;
+export type DietaryTag = (typeof DIETARY_TAGS)[number];
+export const ORDER_STATUSES = ["placed", "accepted", "preparing", "ready", "picked_up", "cancelled"] as const;
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
+
+export const menuCategory = pgTable(
+  "menu_category",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    ownerId: text("owner_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    title: text("title").notNull(),
-    body: text("body").notNull().default(""),
+    name: text("name").notNull(),
+    position: integer("position").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("item_owner_id_idx").on(t.ownerId)],
+  (t) => [check("menu_category_name_chk", sql`char_length(${t.name}) between 1 and 60`)],
+);
+
+export const menuItem = pgTable(
+  "menu_item",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // Items are archived, never deleted: allergen_change (append-only) and order lines point at them.
+    categoryId: uuid("category_id")
+      .notNull()
+      .references(() => menuCategory.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    priceCents: integer("price_cents").notNull(),
+    dietaryTags: text("dietary_tags").array().notNull().default(sql`'{}'::text[]`),
+    soldOut: boolean("sold_out").notNull().default(false),
+    position: integer("position").notNull().default(0),
+    /** The "I checked these against the recipe" stamp. Null means never verified. */
+    allergensVerifiedAt: timestamp("allergens_verified_at", { withTimezone: true }),
+    allergensVerifiedBy: text("allergens_verified_by").references(() => user.id, { onDelete: "set null" }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("menu_item_category_idx").on(t.categoryId),
+    check("menu_item_name_chk", sql`char_length(${t.name}) between 1 and 80`),
+    check("menu_item_description_chk", sql`char_length(${t.description}) <= 300`),
+    check("menu_item_price_chk", sql`${t.priceCents} between 0 and 100000`),
+    check("menu_item_tags_chk", sql`${t.dietaryTags} <@ array[${list(DIETARY_TAGS)}]::text[]`),
+  ],
+);
+
+/** No row means "not declared", which the app never shows as "free of". */
+export const menuItemAllergen = pgTable(
+  "menu_item_allergen",
+  {
+    itemId: uuid("item_id")
+      .notNull()
+      .references(() => menuItem.id, { onDelete: "cascade" }),
+    allergen: text("allergen", { enum: ALLERGENS }).notNull(),
+    level: text("level", { enum: ALLERGEN_LEVELS }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.itemId, t.allergen] }),
+    check("menu_item_allergen_allergen_chk", sql`${t.allergen} in (${list(ALLERGENS)})`),
+    check("menu_item_allergen_level_chk", sql`${t.level} in (${list(ALLERGEN_LEVELS)})`),
+  ],
+);
+
+/**
+ * Append-only log of every allergen declaration change (a database trigger refuses UPDATE, DELETE and TRUNCATE).
+ * `actor_id` has no foreign key on purpose: the record must outlive the account.
+ */
+export const allergenChange = pgTable(
+  "allergen_change",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    itemId: uuid("item_id")
+      .notNull()
+      .references(() => menuItem.id, { onDelete: "restrict" }),
+    actorId: text("actor_id").notNull(),
+    before: jsonb("before").$type<{ allergen: Allergen; level: AllergenLevel }[]>().notNull(),
+    after: jsonb("after").$type<{ allergen: Allergen; level: AllergenLevel }[]>().notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("allergen_change_item_at_idx").on(t.itemId, t.at)],
+);
+
+/** Singleton row (id is always 1). */
+export const restaurantSetting = pgTable(
+  "restaurant_setting",
+  {
+    id: integer("id").primaryKey().default(1),
+    acceptingOrders: boolean("accepting_orders").notNull().default(true),
+    pickupMinutes: integer("pickup_minutes").notNull().default(20),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("restaurant_setting_singleton_chk", sql`${t.id} = 1`), check("restaurant_setting_pickup_chk", sql`${t.pickupMinutes} between 5 and 90`)],
+);
+
+/** One row per UTC day; the row lock taken by the upsert serializes daily order numbers. */
+export const dailyCounter = pgTable("daily_counter", {
+  day: date("day", { mode: "string" }).primaryKey(),
+  last: integer("last").notNull().default(0),
+});
+
+export const order = pgTable(
+  "order",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** "A-042": per UTC day, from daily_counter. */
+    number: text("number").notNull(),
+    day: date("day", { mode: "string" })
+      .notNull()
+      .default(sql`(now() at time zone 'utc')::date`),
+    customerId: text("customer_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    status: text("status", { enum: ORDER_STATUSES }).notNull().default("placed"),
+    pickupName: text("pickup_name").notNull(),
+    note: text("note").notNull().default(""),
+    // The allergy question. Health data: immutable after placement (trigger), customer and staff only.
+    allergyAlert: boolean("allergy_alert").notNull().default(false),
+    allergyAllergens: text("allergy_allergens").array().notNull().default(sql`'{}'::text[]`),
+    allergyNote: text("allergy_note").notNull().default(""),
+    /** The customer ticked "I'll confirm with staff before eating" (required when a dish matches a picked allergen). */
+    allergyCustomerConfirmed: boolean("allergy_customer_confirmed").notNull().default(false),
+    allergyAckBy: text("allergy_ack_by").references(() => user.id, { onDelete: "set null" }),
+    allergyAckAt: timestamp("allergy_ack_at", { withTimezone: true }),
+    /** Computed on the server from the menu prices at order time. Integer cents. */
+    subtotalCents: integer("subtotal_cents").notNull(),
+    idempotencyKey: uuid("idempotency_key").notNull(),
+    cancelReason: text("cancel_reason"),
+    /** Estimated pickup time, fixed at placement from restaurant_setting.pickup_minutes. */
+    readyEstimateAt: timestamp("ready_estimate_at", { withTimezone: true }).notNull(),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("order_id_customer_uq").on(t.id, t.customerId),
+    uniqueIndex("order_customer_idempotency_uidx").on(t.customerId, t.idempotencyKey),
+    uniqueIndex("order_day_number_uidx").on(t.day, t.number),
+    index("order_status_created_idx").on(t.status, t.createdAt),
+    index("order_customer_created_idx").on(t.customerId, t.createdAt),
+    check("order_status_chk", sql`${t.status} in (${list(ORDER_STATUSES)})`),
+    check("order_pickup_name_chk", sql`char_length(${t.pickupName}) between 1 and 40`),
+    check("order_note_chk", sql`char_length(${t.note}) <= 200 and char_length(${t.allergyNote}) <= 200`),
+    check("order_subtotal_chk", sql`${t.subtotalCents} >= 0`),
+    check("order_allergens_chk", sql`${t.allergyAllergens} <@ array[${list(ALLERGENS)}]::text[]`),
+    // No alert, no allergy data; an alert always carries at least an allergen or a note.
+    check(
+      "order_allergy_shape_chk",
+      sql`(${t.allergyAlert} and (cardinality(${t.allergyAllergens}) > 0 or char_length(${t.allergyNote}) > 0)) or (not ${t.allergyAlert} and cardinality(${t.allergyAllergens}) = 0 and ${t.allergyNote} = '')`,
+    ),
+    check("order_ack_shape_chk", sql`(${t.allergyAckAt} is null or ${t.allergyAlert})`),
+    check("order_confirmed_shape_chk", sql`(not ${t.allergyCustomerConfirmed} or ${t.allergyAlert})`),
+    check("order_cancel_reason_chk", sql`${t.cancelReason} is null or char_length(${t.cancelReason}) <= 200`),
+  ],
+);
+
+export const orderLine = pgTable(
+  "order_line",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orderId: uuid("order_id").notNull(),
+    customerId: text("customer_id").notNull(),
+    menuItemId: uuid("menu_item_id")
+      .notNull()
+      .references(() => menuItem.id, { onDelete: "restrict" }),
+    // Snapshots: what the customer saw and what the kitchen must cook, whatever the menu says later.
+    name: text("name").notNull(),
+    unitPriceCents: integer("unit_price_cents").notNull(),
+    qty: integer("qty").notNull(),
+    allergens: jsonb("allergens").$type<{ allergen: Allergen; level: AllergenLevel }[]>().notNull(),
+    position: integer("position").notNull().default(0),
+  },
+  (t) => [
+    foreignKey({ columns: [t.orderId, t.customerId], foreignColumns: [order.id, order.customerId], name: "order_line_order_customer_fk" }).onDelete("cascade"),
+    index("order_line_order_idx").on(t.orderId),
+    check("order_line_qty_chk", sql`${t.qty} between 1 and 20`),
+    check("order_line_price_chk", sql`${t.unitPriceCents} between 0 and 100000`),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -92,10 +264,8 @@ export const item = pgTable(
 // needs a migration, because the CHECK constraints below are part of the schema.
 // ---------------------------------------------------------------------------
 
-export const RATE_KINDS = ["api_write", "ai", "upload"] as const;
+export const RATE_KINDS = ["order", "qa", "menu_write", "ai", "demo_load"] as const;
 export const DAILY_USAGE_KINDS = ["ai", "demo_load"] as const;
-
-const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
 
 /** App-wide daily counters (one row per UTC day and kind) for free-tier caps. */
 export const dailyUsage = pgTable(
@@ -172,5 +342,6 @@ export const job = pgTable(
 );
 
 export type User = typeof user.$inferSelect;
-export type Item = typeof item.$inferSelect;
+export type MenuItem = typeof menuItem.$inferSelect;
+export type Order = typeof order.$inferSelect;
 export type Job = typeof job.$inferSelect;

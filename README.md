@@ -6,10 +6,25 @@ image that deploys to AWS, Azure, Google Cloud or Oracle Cloud.
 
 ## What this app does
 
-_Each app replaces this section: the customer problem, who uses it, and what the AI feature does._
+**Restaurant Ordering** (app 12): order ahead for pickup without paying a marketplace. Customers browse a menu
+with prices and declared allergens, place pickup orders (payment is at pickup; there is no online payment) and
+track them; the kitchen works a board; allergen information is handled with liability in mind.
 
-The template ships an example "items" feature: users manage their own items, admins see everyone's, and
-an AI summary describes the list.
+- **Roles:** `user` (customer), `staff` (kitchen and menu) and `admin` (counts, user management and the demo
+  button; never order contents or allergy details).
+- **Menu:** staff edit items, prices, sold-out and structured allergen declarations. A declaration is only saved
+  with the "I checked these against the recipe" tick (`verified: true`) and the item's current `version`; each
+  change is appended to an append-only log. An allergen that isn't declared is never shown as "free of".
+- **Orders:** the server computes totals in integer cents from the current menu and snapshots names, prices and
+  declarations on each line. `idempotencyKey` makes a retry return the first order. The status machine
+  (`placed`, `accepted`, `preparing`, `ready`, `picked_up`, or `cancelled`) is enforced on the server with a `version`.
+- **Allergy question:** required at checkout. A dish that declares a picked allergen needs the customer's
+  confirmation; the order carries an allergy alert that is fixed after placement, and **staff must acknowledge
+  it before the order can be accepted** (or cancel it).
+- **Demo:** "Demo Noodle Bar" (24 dishes, 3 customers, 2 staff, 1 admin, orders in every state, one with an
+  allergy alert): the admin button, or `scripts/seed-demo.mts` locally.
+- **Status:** this is the data and API layer (issue 12.1). The live status stream (12.2), the menu assistant (12.3)
+  and the pages (12.4) follow.
 
 ## Architecture
 
@@ -34,7 +49,11 @@ Next.js container ── pages, server actions, route handlers (/api/*)
 
 ## Auth and roles
 
-Two roles, `user` and `admin`, via Better Auth's admin plugin. **Admins manage accounts but never act as users:**
+Three roles, `user` (customer), `staff` and `admin`, via Better Auth's admin plugin. One role per account. `staff`
+holds no Better Auth permissions: its powers are app-level, checked in `src/lib/access.ts`, and admin is not a
+superset of staff. Sign-up and `/update-user` can't set a role; only an admin grants `staff` (through `set-role`,
+`create-user` or `update-user`), and every grant is logged as `role.changed`. Tests: `test/roles.integration.test.ts`.
+**Admins manage accounts but never act as users:**
 `src/lib/auth/permissions.ts` gives `admin` create, list, get, update, set-role, ban and delete on users plus
 session revoke/delete. It withholds `impersonate`, `impersonate-admins`, `set-password` and `set-email`
 (Better Auth's default admin role includes them) and session `list`, which would expose other users' raw

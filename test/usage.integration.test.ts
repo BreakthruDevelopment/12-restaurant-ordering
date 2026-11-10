@@ -25,16 +25,16 @@ describe.skipIf(!url)("rate limits (Postgres)", () => {
 
   it("lets exactly `limit` of 20 parallel calls through", async () => {
     const results = await Promise.allSettled(
-      Array.from({ length: 20 }, () => database.transaction((tx) => usage.consumeRate(tx, "use-a", "api_write", 5, "slow down"))),
+      Array.from({ length: 20 }, () => database.transaction((tx) => usage.consumeRate(tx, "use-a", "order", 5, "slow down"))),
     );
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(5);
     expect(results.filter((r) => r.status === "rejected" && (r.reason as { status?: number }).status === 429)).toHaveLength(15);
   });
 
   it("rateIsFull reads the same window", async () => {
-    expect(await usage.rateIsFull("use-a", "api_write", 5)).toBe(true);
-    expect(await usage.rateIsFull("use-a", "api_write", 6)).toBe(false);
-    expect(await usage.rateIsFull("use-a", "api_write", 5, { windowSeconds: 0 })).toBe(false);
+    expect(await usage.rateIsFull("use-a", "order", 5)).toBe(true);
+    expect(await usage.rateIsFull("use-a", "order", 6)).toBe(false);
+    expect(await usage.rateIsFull("use-a", "order", 5, { windowSeconds: 0 })).toBe(false);
   });
 
   it("the window slides: old attempts stop counting, new ones start to", async () => {
@@ -51,10 +51,10 @@ describe.skipIf(!url)("rate limits (Postgres)", () => {
 
   it("releaseRate undoes the newest attempt", async () => {
     await sql`insert into "user" (id, name, email) values ('use-c', 'c', 'use-c@test.local') on conflict do nothing`;
-    await database.transaction((tx) => usage.consumeRate(tx, "use-c", "upload", 1, "slow"));
-    expect(await usage.rateIsFull("use-c", "upload", 1)).toBe(true);
-    await database.transaction((tx) => usage.releaseRate(tx, "use-c", "upload"));
-    expect(await usage.rateIsFull("use-c", "upload", 1)).toBe(false);
+    await database.transaction((tx) => usage.consumeRate(tx, "use-c", "menu_write", 1, "slow"));
+    expect(await usage.rateIsFull("use-c", "menu_write", 1)).toBe(true);
+    await database.transaction((tx) => usage.releaseRate(tx, "use-c", "menu_write"));
+    expect(await usage.rateIsFull("use-c", "menu_write", 1)).toBe(false);
   });
 
   it("reserveDaily lets exactly `cap` of 20 parallel reservations through, and releaseDaily gives one back", async () => {
@@ -85,6 +85,6 @@ describe.skipIf(!url)("rate limits (Postgres)", () => {
 
   it("does not accept a pool handle (type-level)", () => {
     // @ts-expect-error a pool handle is not a transaction
-    void (() => usage.consumeRate(database, "use-a", "api_write", 5, "x"));
+    void (() => usage.consumeRate(database, "use-a", "order", 5, "x"));
   });
 });
