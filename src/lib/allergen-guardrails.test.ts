@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { demoFixtures } from "@/lib/ai/demo";
 import { containsSafetyClaim, guardModelOutput, looksLikeEnglishText, amountsInCents, allergenReply, type GuardContext } from "./allergen-guardrails";
+import { BAD_STRUCTURE_ANSWERS, CLAIM_ANSWERS, CLAIM_DISH_NAMES } from "../../test/review-cases";
 import { type AssistantItem, scanLexicon } from "./allergen-router";
 import { buildMenuQaPrompt, menuQaOutput, type MenuQaOutput } from "./menu-qa";
 
@@ -19,6 +20,11 @@ const item = (name: string, priceCents: number, over: Partial<AssistantItem> = {
 
 /** Dish names without any lexicon word, so substituted names can't trip the checks a property test makes on the final text. */
 const PLAIN_MENU = [item("Spicy Noodles", 1450, { dietaryTags: ["spicy"] }), item("Rice Bowl", 1200), item("Jasmine Tea", 300), item("Sold Out Pie", 600, { soldOut: true })];
+/** The menu from the review probes, with dishes whose names read as claims. */
+const REVIEW_MENU = [
+  item("Pad Thai", 1450), item("Green Curry", 1350), item("Gluten-Free Rice Bowl", 1200), item("Satay", 900),
+  item("Nut Free Brownie", 600), item("Spring Rolls", 700), item("Safe Harbor Soup", 500),
+];
 const MENU = [
   item("Pad Thai", 1450, { allergens: [{ allergen: "peanuts", level: "contains" }] }),
   item("House Salad", 900),
@@ -34,7 +40,7 @@ const out = (answer: string, itemRefs: string[] = [], mentionsAllergyOrDiet = fa
 
 describe("guardrail 1: the model flags allergies or diets", () => {
   it("discards the model text and returns the deterministic answer", () => {
-    const c = ctx(MENU, { question: "¿Qué platos llevan huevo?" });
+    const c = ctx(MENU, { question: "Quais pratos t\u00eam ovo?" }); // Portuguese: not in the lexicon
     const r = guardModelOutput(out("Several dishes have eggs, ask at the counter. MODELTEXT", ["M1"], true), c);
     expect(r.mode).toBe("guardrail");
     expect(r.answer).not.toContain("MODELTEXT");
@@ -90,7 +96,7 @@ describe("guardrail 3: safety-claim filter", () => {
     expect(r).toEqual(allergenReply("what salads do you have?", MENU, "guardrail", NOW));
   });
   it("does not flag ordinary menu talk", () => {
-    for (const ok of ["Try M1 or M3 for a hot, filling meal.", "M3 is our spicy pick and a guest favourite.", "Ask staff about anything not covered here."]) expect(containsSafetyClaim(ok)).toBe(false);
+    for (const ok of ["Try M1 or M3 for a hot, filling meal.", "M3 is our spicy pick and a guest favourite.", "Ask staff about anything else."]) expect(containsSafetyClaim(ok)).toBe(false);
   });
 });
 
@@ -115,7 +121,7 @@ describe("answers the English-only filters cannot read are refused", () => {
 describe("guardrail 4: refs and prices", () => {
   it("drops refs that do not exist or are not available, and shows database names and prices", () => {
     const c = ctx(PLAIN_MENU);
-    const r = guardModelOutput(out("Try the noodles or the bowl for lunch.", ["M1", "M9", "M4", "M2"]), c);
+    const r = guardModelOutput(out("Try M1 or M2 for lunch.", ["M1", "M9", "M4", "M2"]), c);
     expect(r.mode).toBe("general");
     // Only three dishes are available (the pie is sold out), so M4 and M9 do not exist.
     expect(r.items.map((i) => i.name)).toEqual(["Spicy Noodles", "Rice Bowl"]);
@@ -165,15 +171,55 @@ describe("the demo fixture", () => {
     const r = guardModelOutput(fixture, ctx(PLAIN_MENU, { demo: true }));
     expect(r.mode).toBe("demo");
     expect(r.demo).toBe(true);
-    expect(r.answer).toBe(fixture.answer);
+    expect(r.answer).toBe("Demo answer (recorded sample): try Spicy Noodles or Rice Bowl, two dishes guests often order. Ask staff about anything else.");
     expect(r.items.map((i) => i.name)).toEqual(["Spicy Noodles", "Rice Bowl"]);
     expect(r.footer).toBe("Allergies? Ask staff before ordering.");
+  });
+});
+
+describe("regression set from the PR review", () => {
+  it.each(CLAIM_ANSWERS)("never returns %j as model text", (answer) => {
+    for (const refs of [[], ["M2"], ["M1", "M2"]]) {
+      const r = guardModelOutput(out(answer, refs), ctx(REVIEW_MENU, { question: "what do you recommend" }));
+      expect(["general", "demo"], answer).not.toContain(r.mode);
+    }
+  });
+  it.each(BAD_STRUCTURE_ANSWERS)("refuses %j", (answer) => {
+    const r = guardModelOutput(out(answer, ["M2"]), ctx(REVIEW_MENU, { question: "what do you recommend" }));
+    expect(["general", "demo"], answer).not.toContain(r.mode);
+  });
+  it("a claim that only appears once a dish name is substituted falls back to the deterministic answer", () => {
+    for (const name of CLAIM_DISH_NAMES) {
+      const menu = [item(name, 1200), item("Plain Rice", 300)];
+      const r = guardModelOutput(out("Try M1 for lunch.", ["M1"]), ctx(menu, { question: "what is popular" }));
+      expect(r.mode, name).toBe("guardrail");
+      expect(r.answer, name).toBe(allergenReply("what is popular", menu, "guardrail", NOW).answer);
+    }
+  });
+  it("a dish name that only contains an allergen word keeps the general answer", () => {
+    const menu = [item("Peanut Butter Brownie", 700), item("Plain Rice", 300)];
+    const r = guardModelOutput(out("Try M1 for dessert.", ["M1"]), ctx(menu));
+    expect(r.mode).toBe("general");
+    expect(r.answer).toBe("Try Peanut Butter Brownie for dessert.");
+  });
+  it("the angle-bracket trick: the check sees the text the customer would see", () => {
+    for (const a of ["M1 is sa<fe.", "M1 is sa>fe.", "M1 is \u0073a\u200bfe."]) expect(guardModelOutput(out(a, ["M1"]), ctx(PLAIN_MENU)).mode).toBe("guardrail");
+  });
+  it("needs a ref in the text, and refuses any other digits, however short the answer", () => {
+    for (const a of ["Try the noodles.", "Try M1 for 2 people.", "Try M1, 5 stars.", "Spicy!"]) expect(guardModelOutput(out(a, ["M1"]), ctx(PLAIN_MENU)).mode, a).toBe("guardrail");
+    expect(guardModelOutput(out("Try M1 for lunch.", ["M1"]), ctx(PLAIN_MENU)).mode).toBe("general");
+  });
+  it("is ASCII English only, whatever the length", () => {
+    for (const a of ["M1 \u00e9", "M1 muy bueno", "M1 \u4e0d\u9519", "M1 caf\u00e9"]) expect(guardModelOutput(out(a, ["M1"]), ctx(PLAIN_MENU)).mode, a).toBe("guardrail");
   });
 });
 
 // ---------------------------------------------------------------------------
 // Property test: no code path returns model text that contains a safety-claim phrase.
 // ---------------------------------------------------------------------------
+
+/** A digit-free marker for run n: answers may not contain stray digits. */
+const letters = (n: number): string => [...String(n)].map((d) => "abcdefghij"[Number(d)]).join("");
 
 /** Small seeded generator, so a failure reproduces. */
 function mulberry32(seed: number) {
@@ -187,11 +233,13 @@ function mulberry32(seed: number) {
 }
 
 const BENIGN = [
-  "Try M1", "or M2", "for a hot lunch", "It is a guest favourite", "served with rice and vegetables", "Ask staff about anything else",
-  "Our spicy pick is M1", "M3 is a light option", "Both are popular today", "a filling meal for two", "Order ahead for pickup",
+  "try M1", "or M2", "for a hot lunch", "it is a guest favourite", "served with rice and vegetables", "ask staff about anything else",
+  "our spicy pick is M1", "M3 is a light option", "both are popular today", "a filling meal for us", "order ahead for pickup",
 ];
 // Each phrase is something the spec or the task says must never reach a customer from the model.
 const CLAIMS = [
+  // every claim string from the PR review
+  ...CLAIM_ANSWERS,
   "this is safe", "safe for dairy allergies", "perfectly safe", "free of nuts", "free from gluten", "gluten-free", "nut free", "dairy-free", "peanut-free",
   "no nuts", "no dairy", "no gluten", "no added dairy", "doesn't contain peanuts", "does not contain eggs", "doesnt contain soy", "without shellfish",
   "without any nuts", "suitable for vegans", "suitable for allergies", "okay for celiacs", "ok for kids with allergies", "fine for you", "allergy-friendly",
@@ -227,13 +275,13 @@ describe("property: no path returns model text containing a safety claim", () =>
     let passedThrough = 0;
     let withClaim = 0;
     for (let n = 0; n < ITERATIONS; n++) {
-      const marker = `zqx${n}`;
+      const marker = `zqx${letters(n)}`;
       const parts: string[] = [];
       const pieces = 1 + Math.floor(rnd() * 4);
       for (let p = 0; p < pieces; p++) parts.push(BENIGN[Math.floor(rnd() * BENIGN.length)]);
       const claim = rnd() < 0.7;
       if (claim) parts.splice(Math.floor(rnd() * (parts.length + 1)), 0, mutate(CLAIMS[Math.floor(rnd() * CLAIMS.length)], rnd));
-      const answer = `${parts.join(rnd() < 0.5 ? ". " : ", ")} ${marker}`;
+      const answer = `Try M1. ${parts.join(". ")}. ${marker}`;
       const refs = ["M1", "M2", "M3", "M4", "M9"].filter(() => rnd() < 0.4);
       const output: MenuQaOutput = { answer: answer.slice(0, 500), itemRefs: refs.slice(0, 5), mentionsAllergyOrDiet: rnd() < 0.05 };
       const reply = guardModelOutput(output, { ...base, demo: rnd() < 0.3 });
@@ -261,11 +309,10 @@ describe("property: no path returns model text containing a safety claim", () =>
   });
 
   it("never passes model text through when the model flagged the question, whatever the text says", () => {
-    const rnd = mulberry32(777);
     for (let n = 0; n < 500; n++) {
-      const answer = `${BENIGN[Math.floor(rnd() * BENIGN.length)]} zqy${n}`;
+      const answer = `try M1 zqy${letters(n)}`;
       const reply = guardModelOutput({ answer, itemRefs: ["M1"], mentionsAllergyOrDiet: true }, base);
-      expect(reply.answer).not.toContain(`zqy${n}`);
+      expect(reply.answer).not.toContain(`zqy${letters(n)}`);
       expect(reply.mode).toBe("guardrail");
     }
   });
@@ -276,8 +323,8 @@ describe("property: no path returns model text containing a safety claim", () =>
     for (let n = 0; n < 3000; n++) {
       const len = 3 + Math.floor(rnd() * 25);
       const answer = Array.from({ length: len }, () => words[Math.floor(rnd() * words.length)]).join(" ");
-      const reply = guardModelOutput({ answer: `${answer} zqz${n}`, itemRefs: [], mentionsAllergyOrDiet: false }, base);
-      if (reply.answer.includes(`zqz${n}`)) {
+      const reply = guardModelOutput({ answer: `Try M1 ${answer} zqz${letters(n)}`, itemRefs: [], mentionsAllergyOrDiet: false }, base);
+      if (reply.answer.includes(`zqz${letters(n)}`)) {
         expect(containsSafetyClaim(reply.answer), reply.answer).toBe(false);
         expect(scanLexicon(reply.answer).hit, reply.answer).toBe(false);
       }

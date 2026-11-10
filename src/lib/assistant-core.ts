@@ -3,7 +3,7 @@ import { AiError } from "@/lib/ai/types";
 import { ASSISTANT_FOOTER, type AssistantItem, routeQuestion } from "@/lib/allergen-router";
 import { type AssistantReply, allergenReply, guardModelOutput } from "@/lib/allergen-guardrails";
 import { log } from "@/lib/log";
-import { MENU_QA_SYSTEM, MENU_QA_TASK, buildMenuQaPrompt, menuQaOutput } from "@/lib/menu-qa";
+import { MENU_QA_SYSTEM, MENU_QA_TASK, buildMenuQaPrompt, demoCanAnswer, menuQaOutput } from "@/lib/menu-qa";
 
 /**
  * The menu assistant without the database: route the question, answer allergen questions deterministically, send
@@ -35,7 +35,9 @@ export async function answerQuestion(
   const gen = deps.generate ?? defaultGenerate;
   try {
     const result = await gen({ task: MENU_QA_TASK, system: MENU_QA_SYSTEM, prompt, schema: menuQaOutput, maxOutputTokens: 400 });
-    const reply = guardModelOutput(result.data, { question, menu, refs, demo: result.demo, now: deps.now });
+    // A recorded answer can't read the question: serve it only for plainly general topics, else flag it so it becomes "ask staff".
+    const data = result.demo && !demoCanAnswer(question) ? { ...result.data, mentionsAllergyOrDiet: true } : result.data;
+    const reply = guardModelOutput(data, { question, menu, refs, demo: result.demo, now: deps.now });
     return { reply, meta: { model: result.demo ? "demo" : "live" } };
   } catch (err) {
     if (!(err instanceof AiError)) throw err;

@@ -14,7 +14,7 @@
     "db:migrate": "tsx scripts/migrate.mts",
     "db:seed": "tsx scripts/seed.mts",
     "smoke": "bash scripts/smoke.sh",
-    "eval:menu": "AI_PROVIDER=gemini vitest run test/ai-evals.test.ts"
+    "eval:menu": "bash scripts/eval-menu.sh"
   },
   "dependencies": {
     "better-auth": "^1.7.15",

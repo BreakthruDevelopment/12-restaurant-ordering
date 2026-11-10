@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Allergen } from "@/lib/db/schema";
+import { CONSTRAINT_QUESTIONS, GENERAL_QUESTIONS } from "../../test/review-cases";
 import { type AssistantItem, allergenAnswer, namedItems, normalizeText, routeQuestion, scanLexicon } from "./allergen-router";
 
 /** Allergen mode: the router must send these to the deterministic path. Second column: allergens it should recognise (subset check). */
@@ -83,6 +84,16 @@ const ALLERGEN_PHRASINGS: [string, Allergen[]][] = [
   ["ＰＥＡＮＵＴ free", ["peanuts"]],
   ["crème brûlée has cream?", ["milk"]],
   ["sulfite allergy?", []],
+  ["¿Qué platos llevan huevo?", ["egg"]],
+  ["¿El pad thai tiene maní?", ["peanuts"]],
+  ["le pad thai contient-il des arachides ?", ["peanuts"]],
+  ["Enthält das Gericht Erdnüsse?", ["peanuts"]],
+  ["Ha il glutine?", ["gluten"]],
+  ["is the pad thai GF", ["gluten"]],
+  ["peenuts", ["peanuts"]],
+  ["peanots", ["peanuts"]],
+  ["w h e a t", ["wheat"]],
+  ["whe at", ["wheat"]],
 ];
 
 /** General mode: nothing here touches an allergen, so the model path may answer them. */
@@ -101,14 +112,12 @@ const GENERAL_PHRASINGS: string[] = [
   "Do you have something light?",
   "What should I order for two people?",
   "Is the ramen spicy?",
-  "Do you have anything vegetarian?",
   "What's better, the ramen or the pad thai?",
   "Where do I pick up my order?",
   "What time do you open?",
   "How big is the portion?",
   "What are today's specials?",
   "Recommend a starter",
-  "¿Qué platos llevan huevo?",
   "Quel plat est le plus populaire ?",
   "What's the price of the katsu curry?",
   "Is there anything hot and filling?",
@@ -127,6 +136,26 @@ describe("allergen router: phrasings that must reach the deterministic answer", 
     const route = routeQuestion(question);
     expect(route.mode).toBe("allergen");
     for (const a of allergens) expect(route.allergens).toContain(a);
+  });
+});
+
+describe("allergen router: every question from the PR review reaches the deterministic path", () => {
+  it.each(CONSTRAINT_QUESTIONS)("routes %j to allergen mode", (q) => {
+    expect(routeQuestion(q).mode).toBe("allergen");
+  });
+  it("keeps plainly general questions general", () => {
+    for (const q of GENERAL_QUESTIONS) expect(routeQuestion(q).mode).toBe("general");
+  });
+  it("sends anything with non-Latin letters to the ask-staff answer", () => {
+    for (const q of ["ピーナッツ", "what is 花生", "Привет menu", "pеanut"]) {
+      expect(routeQuestion(q).mode).toBe("allergen");
+      const a = allergenAnswer(q, MENU, { now: NOW });
+      expect(a.text.startsWith("Please speak with staff before ordering.") || a.allergens.length > 0).toBe(true);
+    }
+    expect(allergenAnswer("ピーナッツ", MENU, { now: NOW }).items).toEqual([]);
+  });
+  it("reads Cyrillic look-alikes as the Latin letters they imitate", () => {
+    expect(routeQuestion("реаnut").allergens).toContain("peanuts");
   });
 });
 
@@ -244,23 +273,52 @@ describe("allergenAnswer", () => {
     expect(over).toContain("hasn't been checked recently");
   });
 
-  it("severe words lead with 'speak with staff' and name only dishes that contain the allergen", () => {
+  it("severe words lead with 'speak with staff' and name the dishes that contain or may contain the allergen", () => {
     const { text, items } = allergenAnswer("I'm celiac, what can I eat?", MENU, { now: NOW });
     expect(text.startsWith("Please speak with staff before ordering.")).toBe(true);
     expect(text).toContain("Dishes that contain gluten: Plain Bun.");
     expect(text).toContain("Dishes that contain wheat: Almond Cookie."); // wheat is linked to gluten, so it is asked about too
-    // Crispy Tofu Bites only may contain wheat: surfaced as cross-contact, not named.
-    expect(text).not.toContain("Crispy Tofu Bites");
-    expect(text).toMatch(/1 other dish may contain wheat through cross-contact: ask staff which\./);
-    expect(items.map((i) => i.name).sort()).toEqual(["Almond Cookie", "Plain Bun"]);
+    expect(text).toContain("Dishes that may contain wheat (cross-contact): Crispy Tofu Bites.");
+    expect(items.map((i) => i.name).sort()).toEqual(["Almond Cookie", "Crispy Tofu Bites", "Plain Bun"]);
   });
 
-  it("severe with a named dish that only may contain: no name, cross-contact stated", () => {
-    const { text } = allergenAnswer("severe wheat allergy, is the crispy tofu bites ok?", MENU, { now: NOW });
+  it("a severe answer never names a dish it has nothing to report about", () => {
+    const { text, items } = allergenAnswer("severe peanut allergy, is the steamed rice ok?", MENU, { now: NOW });
     expect(text.startsWith("Please speak with staff before ordering.")).toBe(true);
-    expect(text).not.toContain("Crispy Tofu Bites");
-    // "tofu" in the dish's name also asks about soy.
-    expect(text).toContain("The dish you asked about may contain wheat and soy through cross-contact: ask staff.");
+    expect(text).not.toContain("Steamed Rice");
+    expect(text).toContain("Peanuts isn't listed for the dish you asked about in our menu data. That isn't a guarantee: please ask staff.");
+    expect(items).toEqual([]);
+  });
+
+  it("severe with a named dish that only may contain: the dish is named with its cross-contact", () => {
+    const { text, items } = allergenAnswer("severe wheat allergy, is the crispy tofu bites ok?", MENU, { now: NOW });
+    expect(text.startsWith("Please speak with staff before ordering.")).toBe(true);
+    expect(text).toContain("Crispy Tofu Bites: may contain wheat (cross-contact).");
+    expect(items.map((i) => i.name)).toEqual(["Crispy Tofu Bites"]);
+  });
+
+  it("keeps each dish's may-contain for other allergens even when it contains one asked allergen (multi-allergen, severe or not)", () => {
+    const menu = [item({ name: "Egg Noodles", allergens: [{ allergen: "egg", level: "contains" }, { allergen: "sesame", level: "may_contain" }] })];
+    for (const q of ["severe egg and sesame allergy", "egg and sesame allergy", "does the egg noodles have egg or sesame, severe allergy", "egg and sesame in the egg noodles"]) {
+      const { text } = allergenAnswer(q, menu, { now: NOW });
+      expect(text, q).toMatch(/contains egg\.|contain egg: Egg Noodles\./);
+      expect(text, q).toMatch(/may contain sesame \(cross-contact\)/);
+    }
+  });
+
+  it("the notice names a related allergen too: a menu that declares only wheat also handles gluten, and the other way round", () => {
+    const wheat = allergenAnswer("does it have soy", [item({ name: "A", allergens: [{ allergen: "wheat", level: "contains" }] })], { now: NOW }).text;
+    expect(wheat).toContain("Our kitchen handles wheat and gluten,");
+    const gluten = allergenAnswer("does it have soy", [item({ name: "A", allergens: [{ allergen: "gluten", level: "contains" }] })], { now: NOW }).text;
+    expect(gluten).toContain("Our kitchen handles wheat and gluten,");
+  });
+
+  it("returns in `items` only dishes that contain or may contain what was asked: never a 'not listed' or unchecked dish", () => {
+    expect(allergenAnswer("does the steamed rice have peanuts?", MENU, { now: NOW }).items).toEqual([]);
+    expect(allergenAnswer("does the house kimchi have peanuts?", MENU, { now: NOW }).items).toEqual([]);
+    expect(allergenAnswer("does the old stamp salad have milk?", MENU, { now: NOW }).items).toEqual([]);
+    expect(allergenAnswer("is the pad thai safe for me?", MENU, { now: NOW }).items.map((i) => i.name)).toEqual(["Pad Thai"]);
+    expect(allergenAnswer("anything with sesame?", MENU, { now: NOW }).items).toEqual([]);
   });
 
   it("an ambiguous or out-of-list question says to ask staff and lists no dishes", () => {

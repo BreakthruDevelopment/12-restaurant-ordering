@@ -131,7 +131,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("spends one model call per live general question and refuses past QA_DAILY_CAP, while allergen answers keep working", async () => {
     live("2");
-    model.impl = liveAnswer("A hot, filling pick for lunch.");
+    model.impl = liveAnswer("Try M1 for a hot lunch.");
     expect((await ask(customer, { question: "what is hot?" })).mode).toBe("general");
     expect((await ask(customer, { question: "what is filling?" })).mode).toBe("general");
     expect(await dailyAi()).toBe(2);
@@ -145,7 +145,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("is safe under a race: 10 parallel live questions with a cap of 3 make exactly 3 model calls", async () => {
     live("3");
-    model.impl = liveAnswer("A hot, filling pick for lunch.");
+    model.impl = liveAnswer("Try M1 for a hot lunch.");
     const results = await Promise.allSettled(Array.from({ length: 10 }, () => ask(customer2, { question: "what is hot?" })));
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(3);
     expect(model.calls).toBe(3);
@@ -154,7 +154,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("gives the reservation back when the live call fell back to the demo fixture or failed", async () => {
     live("5");
-    model.impl = async () => ({ data: { answer: "Demo answer (recorded)", itemRefs: ["M1"], mentionsAllergyOrDiet: false }, provider: "demo", model: "recorded", demo: true, latencyMs: 1 });
+    model.impl = async () => ({ data: { answer: "Demo answer (recorded sample): try M1.", itemRefs: ["M1"], mentionsAllergyOrDiet: false }, provider: "demo", model: "recorded", demo: true, latencyMs: 1 });
     expect((await ask(customer, { question: "what is hot?" })).mode).toBe("demo");
     expect(await dailyAi()).toBe(0);
     const { AiError } = await import("@/lib/ai/types");
@@ -179,7 +179,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("replaces a model answer that claims safety (mode guardrail) and counts it as such", async () => {
     live();
-    model.impl = liveAnswer("The house rice is safe for dairy allergies", ["M2"]);
+    model.impl = liveAnswer("M2 is safe for dairy allergies", ["M2"]);
     const r = await ask(customer, { question: "what sides do you have?" });
     expect(r.mode).toBe("guardrail");
     expect(r.answer).not.toContain("safe for dairy");
@@ -216,7 +216,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("never logs or stores the question text", async () => {
     live();
-    model.impl = liveAnswer("A hot pick.");
+    model.impl = liveAnswer("Try M1 for a hot lunch.");
     const lines: string[] = [];
     for (const m of ["log", "error", "warn", "info", "debug"] as const) vi.spyOn(console, m).mockImplementation((...a: unknown[]) => void lines.push(a.map(String).join(" ")));
     vi.stubEnv("LOG_LEVEL", "debug");

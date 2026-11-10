@@ -49,59 +49,65 @@ export type GuardContext = {
 };
 
 /**
- * Safety-claim phrases, matched against `normalizeText()` output (lower case, no apostrophes or hyphens). Beyond the
- * spec's list this adds "free" on its own, the common translations of "free of"/"without", and a few ways of saying a
- * dish is fine to eat. The router lexicon ("safe", "free", "contain", "allerg" and the allergen words) is checked
- * separately and covers most of the same ground; keeping both is deliberate.
+ * The claim filter is a refusal list, not a denylist of known phrases: a general answer that contains ANY negation or
+ * reassurance token falls back to the deterministic answer. A false refusal costs nothing; a missed claim is the
+ * failure this whole feature exists to prevent. Tokens are matched on `normalizeText()` output (lower case, no
+ * apostrophes, so "isn't" is "isnt"), in English, French, German, Spanish and Italian.
  */
+const REFUSAL_TOKENS = new Set(
+  ("no not none nothing zero never lacks lack skips skip without free fine ok okay worry worries worried worrying harmless trouble clean safe unsafe " +
+    "pas keine kein non nicht sin ningun senza sans less nor nobody neither isnt arent wasnt werent dont doesnt didnt wont wouldnt cant cannot couldnt shouldnt " +
+    "hasnt havent hadnt mustnt neednt ohne libre seguro segura sicher frei zonder veilig sem youll youre").split(" "),
+);
+/** Token prefixes: "worr" (worry, worried), "safe" (safely, safety), "reassur", "harmless". */
+const REFUSAL_PREFIXES = ["safe", "worr", "harmless", "reassur", "gentle", "sensitiv", "tummy", "tummies", "guarantee", "hypoallerg", "suitab", "exclud", "omit", "contain", "friendly"];
+/** Phrases that reassure without a refusal token. */
 const CLAIM_PATTERNS: readonly RegExp[] = [
-  /\bsafe/,
-  /\bfree\b/,
   /\bno (?:\w+ ){0,2}(?:nuts?|peanuts?|dairy|milk|lactose|gluten|wheat|eggs?|soy|soya|sesame|fish|shellfish|shrimp|crab|seafood|allergens?|animal|traces?)/,
-  /\b(?:has|have|had|with) no\b/,
-  /\bnot made with\b/,
-  /\bcontain/,
-  /\bwithout\b/,
-  /\bsuitable\b/,
-  /\b(?:okay|ok|fine) (?:for|to)\b/,
-  /\bfriendly\b/,
-  /\bhypoallergenic/,
-  /\bguarantee/,
+  /\b(?:good|great|perfect|ideal|right|fine|okay|ok) (?:for|to|if)\b/,
+  /\b(?:for|with) you\b/,
+  /\byou (?:can|will|may)\b/,
   /\bcan eat\b/,
-  /\bexclud/,
-  /\bfrei\b|\blibre\b|\bsans\b|\bsin\b|\bohne\b|\bsenza\b|\bzonder\b|\bveilig\b|\bsicher|\bseguro|\bsegura|\bsem\b/,
+  /\bhave nothing\b/,
 ];
 
-/** True if `text` makes (or may make) a safety claim, in any of the forms normalisation folds together. */
+/** True if `text` makes (or may make) a safety claim or any reassurance, in any of the forms normalisation folds together. */
 export function containsSafetyClaim(text: string): boolean {
   const forms = [normalizeText(text), normalizeText(deleet(text.toLowerCase()))];
-  return forms.some((n) => CLAIM_PATTERNS.some((re) => re.test(n)));
+  return forms.some((n) => {
+    if (CLAIM_PATTERNS.some((re) => re.test(n))) return true;
+    return n.split(" ").some((t) => REFUSAL_TOKENS.has(t) || t.endsWith("free") || REFUSAL_PREFIXES.some((p) => t.startsWith(p)));
+  });
 }
 
 /** Four or more single characters in a row: "s a f e", "n 0 n u t s". */
 const SPELLED_OUT = /(?:^| )[a-z0-9](?: [a-z0-9]){3,}(?: |$)/;
 
 const ENGLISH_WORDS = new Set(
-  ("the a an and or of to in on for with is are it its this that these those we you your our they there here have has can be any at by from as if so but not i me my what which some more most also ask staff menu dish dishes try like popular option options available about up all one two than under over per each serve serves served offer offers include includes made comes come really good very").split(" "),
+  ("the a an and or of to in on for with is are it its this that these those we you your our they there here have has can be any at by from as if so but i me my what which some more most also ask staff menu dish dishes try like popular option options available about up all one two than under over per each serve serves served offer offers include includes made comes come really good very cost costs price priced spicy hot mild kids lunch dinner drink drinks dessert starter side special specials best favourite favorite tasty delicious hearty fresh crispy cheap cheapest pick picks choice").split(" "),
 );
 
+/** ASCII letters, digits and punctuation, plus the usual typographic quotes and dashes. Nothing else may reach a customer from a model. */
+const PLAIN_ASCII = /^[\x20-\x7e\n\t‘’“”–—… ]*$/;
+
 /**
- * The claim list is English. Refuse text that is not plausibly English: any letter outside the Latin script (Cyrillic
- * look-alikes, CJK, Arabic), single letters spelled out ("s a f e"), or a sentence with almost no English function
- * words. A refusal falls back to the deterministic answer, so this errs toward refusing.
+ * The claim list is English, so a model answer must be plain ASCII English or it is refused: no accented or non-Latin
+ * letters (look-alikes, other languages), no spelled-out letters ("s a f e"), and every answer, however short, needs
+ * some English function words.
  */
 export function looksLikeEnglishText(text: string): boolean {
-  if (/[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(text)) return false;
+  if (!PLAIN_ASCII.test(text)) return false;
   const norm = normalizeText(text);
   if (SPELLED_OUT.test(norm) || SPELLED_OUT.test(normalizeText(deleet(text.toLowerCase())))) return false;
   const tokens = norm.split(" ").filter((t) => t && !/^\d+$/.test(t) && !/^m\d{1,3}$/.test(t));
-  if (tokens.length < 6) return true;
-  const known = tokens.filter((t) => ENGLISH_WORDS.has(t)).length;
-  return known / tokens.length >= 0.15;
+  if (tokens.length === 0) return true;
+  return tokens.filter((t) => ENGLISH_WORDS.has(t)).length / tokens.length >= 0.15;
 }
 
 const REF_TOKEN = /\bM(\d{1,3})\b/gi;
-const LINK = /https?:|www\.|\w\.(?:com|net|org|io|ai|co|app|dev)\b|@\w/i;
+const LINK = /https?:|www\.|\w\.(?:com|net|org|io|ai|co|app|dev)\b|@\w|\bdot\s*(?:com|net|org|io|ai|co|app|dev)\b|\bat\s+\w+\s+dot\b/i;
+const NUMBER_WORDS = /\b(?:dollars?|bucks?|cents?|euros?|pounds?|ten|eleven|twelve|(?:thir|four|fif|six|seven|eigh|nine)teen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|fiver|tenner|quid)\b/i;
+const SPELLED_DIGITS = /\b(?:(?:oh|zero|one|two|three|four|five|six|seven|eight|nine)[ -]+){3,}/i;
 
 const MONEY_PATTERNS: readonly RegExp[] = [
   /[$€£]\s?(\d[\d,]*(?:\.\d+)?)/g,
@@ -109,8 +115,6 @@ const MONEY_PATTERNS: readonly RegExp[] = [
   /\b(?:usd|eur|gbp)\s?(\d[\d,]*(?:\.\d+)?)/gi,
   /\b(\d+\.\d{2})\b/g,
 ];
-/** Spelled-out amounts ("fourteen dollars") can't be checked, and the menu is in dollars: refuse other currencies outright. */
-const CURRENCY_WORD = /\b(?:dollars?|bucks|euros?|pounds?)\b/i;
 const OTHER_CURRENCY = /[€£]|\b(?:eur|euros?|gbp|pounds?)\b/i;
 
 /** Every price-like amount in the answer, in cents. */
@@ -118,6 +122,15 @@ export function amountsInCents(text: string): number[] {
   const out: number[] = [];
   for (const re of MONEY_PATTERNS) for (const m of text.matchAll(re)) out.push(Math.round(parseFloat(m[1].replace(/,/g, "")) * 100));
   return out;
+}
+
+/** A capitalised word in the middle of a sentence is probably a dish name the model made up: refuse. */
+function hasInventedName(text: string): boolean {
+  const words = text.split(/\s+/);
+  return words.some((w, i) => {
+    if (i === 0 || /[.!?:]["')]*$/.test(words[i - 1]) || w === "I") return false;
+    return /^[("']?[A-Z][a-z]/.test(w);
+  });
 }
 
 const moneyText = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
@@ -142,29 +155,41 @@ function neutralReply(items: readonly AssistantItem[]): AssistantReply {
 
 /**
  * Turn the model's output into the reply the customer sees. Never throws; every failure path is a deterministic reply.
- * A demo answer (from the recorded fixture) goes through exactly the same checks.
+ * A demo answer (from the recorded fixture) goes through exactly the same checks. The claim checks run twice: on the
+ * model's text, and again on the FINAL text after dish names are substituted for refs, so a dish called
+ * "Gluten-Free Rice Bowl" can't smuggle a claim in. A dish name that merely contains an allergen word ("Peanut Butter
+ * Brownie") is fine: the lexicon runs on the model's text only.
  */
 export function guardModelOutput(out: MenuQaOutput, ctx: GuardContext): AssistantReply {
   const replaceWithAllergenAnswer = () => allergenReply(ctx.question, ctx.menu, "guardrail", ctx.now);
-  const raw = out.answer;
+  // What the customer would see if nothing else changed: angle brackets and control characters gone, so "sa<fe" is "safe".
+  const cleaned = cleanText(out.answer);
 
   // 1. The model says the question concerns allergies or diets.
   if (out.mentionsAllergyOrDiet) return replaceWithAllergenAnswer();
-  // 2 and 3. Lexicon and claim filter on the answer; text the English-only filters can't read is refused too.
-  if (!looksLikeEnglishText(raw) || scanLexicon(raw).hit || containsSafetyClaim(raw)) return replaceWithAllergenAnswer();
+  // 2 and 3. English-only plain text, the allergen lexicon, and the refusal filter, on the raw and the cleaned text.
+  for (const text of [out.answer, cleaned]) {
+    if (!looksLikeEnglishText(text) || scanLexicon(text).hit || containsSafetyClaim(text)) return replaceWithAllergenAnswer();
+  }
 
-  // 4. Refs: the model's list is filtered to real, available dishes; refs written in the text must be real too.
+  // 4. Refs: the model's list is filtered to real, available dishes; refs written in the text must be real too, and
+  // there must be at least one, so the answer is about dishes that exist.
   const listed = out.itemRefs.filter((r) => ctx.refs.has(r));
-  const inText = [...raw.matchAll(REF_TOKEN)].map((m) => `M${Number(m[1])}`);
+  const inText = [...cleaned.matchAll(REF_TOKEN)].map((m) => `M${Number(m[1])}`);
   const valid = [...new Set([...listed, ...inText.filter((r) => ctx.refs.has(r))])].map((r) => ctx.refs.get(r) as AssistantItem);
-  if (inText.some((r) => !ctx.refs.has(r))) return neutralReply(valid);
-  if (LINK.test(raw)) return neutralReply(valid);
+  if (inText.length === 0 || inText.some((r) => !ctx.refs.has(r))) return neutralReply(valid);
+  if (LINK.test(cleaned) || NUMBER_WORDS.test(cleaned) || SPELLED_DIGITS.test(cleaned) || hasInventedName(cleaned)) return neutralReply(valid);
 
-  const amounts = amountsInCents(raw);
+  // Digits: only refs and exact menu prices of the referenced dishes may appear.
   const prices = new Set(valid.map((i) => i.priceCents));
-  if (OTHER_CURRENCY.test(raw) || amounts.some((c) => !prices.has(c)) || (amounts.length === 0 && CURRENCY_WORD.test(raw))) return neutralReply(valid);
+  if (OTHER_CURRENCY.test(cleaned) || amountsInCents(cleaned).some((c) => !prices.has(c))) return neutralReply(valid);
+  let rest = cleaned.replace(REF_TOKEN, " ");
+  for (const re of MONEY_PATTERNS) rest = rest.replace(re, " ");
+  if (/\d/.test(rest)) return neutralReply(valid);
 
-  const text = cleanText(raw.replace(REF_TOKEN, (_m, n: string) => ctx.refs.get(`M${Number(n)}`)?.name ?? ""));
-  if (!text) return neutralReply(valid);
-  return reply(ctx.demo ? "demo" : "general", text, valid.slice(0, 5).map(toItem), ctx.demo);
+  const final = cleanText(cleaned.replace(REF_TOKEN, (_m, n: string) => ctx.refs.get(`M${Number(n)}`)?.name ?? ""));
+  if (!final) return neutralReply(valid);
+  // The final text, with the dish names in it, must still be free of claims.
+  if (containsSafetyClaim(final)) return replaceWithAllergenAnswer();
+  return reply(ctx.demo ? "demo" : "general", final, valid.slice(0, 5).map(toItem), ctx.demo);
 }

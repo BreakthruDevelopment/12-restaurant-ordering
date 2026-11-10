@@ -7,10 +7,12 @@ import type { DemoToolScript } from "./types";
  */
 export const demoFixtures: Record<string, unknown> = {
   // Menu assistant, general mode only (issue 12.3). M1 and M2 are the first two available dishes of the request, so the
-  // fixture always points at real dishes. Allergen questions never reach a model, in demo mode or any other.
+  // fixture always points at real dishes, and the text names them by ref (the guardrails require one). The fixture can't
+  // read the question, so the app only serves it for plainly general topics (`demoCanAnswer` in menu-qa.ts) and flags
+  // everything else mentionsAllergyOrDiet: true, which turns it into the ask-staff answer. Allergen questions never
+  // reach a model, in demo mode or any other. The wording avoids every refusal token ("no", "not", "free", ...).
   "menu-qa": {
-    answer:
-      "Demo answer (recorded, not from a live model): here are two dishes guests often order. Ask staff about anything not covered here.",
+    answer: "Demo answer (recorded sample): try M1 or M2, two dishes guests often order. Ask staff about anything else.",
     itemRefs: ["M1", "M2"],
     mentionsAllergyOrDiet: false,
   },

@@ -34,6 +34,12 @@ export const MENU_QA_SYSTEM = [
   'Reply with JSON only: {"answer": string of at most 500 characters, "itemRefs": array of at most 5 references like "M3", "mentionsAllergyOrDiet": boolean}.',
 ].join("\n");
 
+/** Topics a recorded demo answer may be served for. The fixture can't read the question, so anything else is treated as an allergy or diet question. */
+const DEMO_TOPICS = /\b(?:popular|best|favou?rites?|recommend\w*|spicy|hot|mild|kids?|child\w*|cheap\w*|price\w*|cost\w*|under|drinks?|tea|coffee|desserts?|sweets?|starters?|appetizers?|mains?|sides?|specials?|soup|noodles?|rice|bowls?|salads?|pickup|pick up|wait|hours|open|portions?|share|sharing|light|filling|lunch|dinner|menu|order|burger|curry|ramen|comes with)\b/i;
+
+/** True when a canned demo answer is a fair reply to this question. Otherwise the app answers "ask staff". */
+export const demoCanAnswer = (question: string): boolean => DEMO_TOPICS.test(question);
+
 const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
 /** Available dishes (not sold out), in menu order. */
