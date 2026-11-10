@@ -138,6 +138,14 @@ const LEXICON: readonly Term[] = [
   { t: "vegan", a: ANIMAL }, { t: "df", a: ["milk"], exact: true }, { t: "plant based", a: ANIMAL }, { t: "plantbased", a: ANIMAL },
   // other allergens and diets the ten-value list does not cover: always ask staff
   ...group([], "vegetarian kosher halal keto carb sugar diabet pregnan alcohol mustard celery sulfite sulphite corn garlic onion msg histamine nightshade gelatin meat pork beef diet"),
+  // dairy, egg, fish, soy and wheat-based foods named by what they are (review round 3)
+  ...group(["milk"], "paneer ricotta mozzarella parmesan feta mascarpone halloumi gouda cheddar"), { t: "custard", a: ["milk", "egg"] },
+  ...group(["egg"], "meringue aioli omelet omelette"), { t: "brioche", a: ["milk", "egg", "wheat", "gluten"] },
+  ...group(["fish"], "dashi bonito"), ...group(["soy"], "miso edamame tempeh tamari shoyu"),
+  ...group(["wheat", "gluten"], "semolina couscous seitan spelt barley rye malt bulgur durum panko bread pasta batter tempura buckwheat"),
+  { t: "chestnut", a: ["tree_nuts"] },
+  // health, medical and diet words: always ask staff
+  ...group([], "problem condition doctor medical stomach fodmap"), { t: "ibs", exact: true },
   // allergy and intolerance words
   { t: "allerg", anywhere: true, compact: true }, { t: "alerg" }, { t: "allergic", fuzzy: true }, { t: "allergy", fuzzy: true }, { t: "allergen", fuzzy: true },
   { t: "intoleran", anywhere: true }, { t: "intolerant", fuzzy: true }, { t: "sensitiv" }, { t: "react", anywhere: true },
@@ -146,11 +154,15 @@ const LEXICON: readonly Term[] = [
   { t: "ill", exact: true }, { t: "die", exact: true }, { t: "dying", exact: true },
   // severity
   { t: "anaphyla", severe: true, anywhere: true, compact: true }, { t: "epipen", severe: true, fuzzy: true, compact: true }, { t: "epi pen", severe: true },
+  ...group([], "epinephrine adrenaline injector auvi", { severe: true }),
   { t: "severe", severe: true }, { t: "life threatening", severe: true }, { t: "deadly", severe: true }, { t: "fatal", severe: true }, { t: "hospital", severe: true }, { t: "emergency", severe: true },
   // negative-constraint wording: a question that can't, won't, mustn't or avoids something is a constraint question
   ...group([], "cant cannot wont dont doesnt isnt arent mustnt shouldnt couldnt avoid without refrain restrict forbid"),
   { t: "can not" }, { t: "do not" }, { t: "does not" }, { t: "must not" }, { t: "make me" }, { t: "no", exact: true }, { t: "not", exact: true },
   { t: "can", re: /\bcan \w+(?: \w+)? eat\b/ },
+  // "is there ...", "does it have ...", "any X in ...", "have any ...": a question about what is in a dish is an ingredient question
+  { t: "is there", re: /\b(?:is|are) there\b/ }, { t: "does have", re: /\b(?:does|did)\b.*\bhave\b/ }, { t: "has any", re: /\b(?:have|has|having) any\b/ },
+  { t: "any in", re: /\bany\b.*\b(?:in|inside)\b/ },
   // ingredient questions ("what comes with" stays general)
   ...group([], "ingredient recipe whats_in what_is_in whats_inside what_is_inside made_with made_of made_from made_using contents"),
   // claims customers ask for and models must not make
@@ -240,10 +252,62 @@ export function scanLexicon(text: string): Scan {
 
 export type Route = { mode: "allergen" | "general"; allergens: Allergen[]; severe: boolean };
 
-/** The router: lexicon hit means allergen mode, otherwise general mode. Deterministic and offline. */
-export function routeQuestion(question: string): Route {
+/** Words that carry no topic: function words, greetings, "what's", "please". */
+const STOPWORDS = new Set(
+  ("a an the and or but of to in on at for with from by as is are was were be been am do does did can could would should will may might i me my mine we us our you your it its this that these those there here " +
+    "what whats which who whom how hows when where why please pls hey hi hello thanks thank tell show give get gimme want wanna like love looking look see find need needs got have has had any some anything something " +
+    "one ones more most much many very really so too just also about around up down out over than then if else now today tonight right yes yeah yep s t u").split(" "),
+);
+
+/** The fixed general vocabulary: what a menu question for suggestions or wait times may be about. Anything else goes to ask-staff. */
+const GENERAL_VOCAB = new Set(
+  ("popular popularity best top favourite favorite favourites favorites recommend recommended recommendation recommendations suggest suggestion suggestions special specials " +
+    "spicy spice spices hot mild milder cheap cheaper cheapest budget affordable under below price prices cost costs expensive quick quickly fast faster kid kids child children friendly share sharing shareable " +
+    "dessert desserts sweet sweets drink drinks beverage beverages tea coffee starter starters appetizer appetizers main mains entree entrees side sides soup soups noodle noodles rice bowl bowls salad salads " +
+    "lunch dinner meal meals dish dishes menu food light filling big small portion portions good great nice tasty delicious try order ordering " +
+    "seller sellers todays wait waiting long ready pickup pick open opening hours close closing closes time minutes minute lighter").split(" "),
+);
+const TIME_WORDS = new Set("seller sellers todays wait waiting long ready pickup pick open opening hours close closing closes time minutes minute".split(" "));
+
+const stem = (t: string): string[] => [t, t.replace(/(?:es|s)$/, "")];
+
+/** The words of the current menu's dish names (and nothing else about the dishes), for the allowlist. */
+export function menuWordsOf(menu: readonly { name: string }[]): Set<string> {
+  const out = new Set<string>();
+  for (const i of menu) for (const w of normalizeText(i.name).split(" ")) if (w.length >= 3) out.add(w);
+  return out;
+}
+
+/**
+ * True when every content word of the question (after normalisation and stopword removal) is in the fixed general
+ * vocabulary or is a word of a dish name on the menu, and at least one is. Numbers are fine ("under 15").
+ */
+export function inGeneralVocabulary(question: string, menuWords: ReadonlySet<string> = new Set()): boolean {
+  const tokens = normalizeText(question).split(" ").filter(Boolean);
+  let topical = 0;
+  for (const tok of tokens) {
+    if (/^\d+$/.test(tok) || STOPWORDS.has(tok)) continue;
+    const forms = stem(tok);
+    if (forms.some((f) => GENERAL_VOCAB.has(f) || menuWords.has(f))) topical++;
+    else return false;
+  }
+  return topical > 0;
+}
+
+/** A question about wait times or opening hours: answered with fixed text, not dish suggestions. */
+export function isTimeQuestion(question: string): boolean {
+  return normalizeText(question).split(" ").some((t) => TIME_WORDS.has(t));
+}
+
+/**
+ * The router. Allergen mode (the deterministic or ask-staff answer) for any lexicon hit, any "is there / does it have /
+ * any X in" question, and any question with a content word outside the fixed general vocabulary and the menu's dish
+ * names. General mode only when the whole question is on the allowlist. Deterministic and offline.
+ */
+export function routeQuestion(question: string, opts: { menuWords?: ReadonlySet<string> } = {}): Route {
   const scan = scanLexicon(question);
-  return { mode: scan.hit ? "allergen" : "general", allergens: scan.allergens, severe: scan.severe };
+  const general = !scan.hit && inGeneralVocabulary(question, opts.menuWords);
+  return { mode: general ? "general" : "allergen", allergens: scan.allergens, severe: scan.severe };
 }
 
 /** True when `text` (a question or a model answer) touches anything in the lexicon. */
@@ -366,11 +430,13 @@ export function allergenAnswer(
     for (const item of named) {
       const contains = byAllergenOrder(item.allergens.filter((d) => d.level === "contains").map((d) => d.allergen));
       const may = byAllergenOrder(item.allergens.filter((d) => d.level === "may_contain").map((d) => d.allergen));
-      const name = cleanText(item.name);
+      const reportable = contains.length > 0 || may.length > 0;
+      // A severe answer never names a dish it has nothing to report about.
+      const name = reportable || !severe ? cleanText(item.name) : "the dish you asked about";
       if (contains.length) lines.push(`${name}: contains ${labels(contains)}.`);
       if (may.length) lines.push(`${name}: may contain ${labels(may)} (cross-contact).`);
-      if (!contains.length && !may.length && isCurrent(item, now)) lines.push(`No allergens are listed for ${name} in our menu data. That isn't a guarantee: please ask staff.`);
-      if (!isCurrent(item, now)) lines.push(`Allergen information for ${name} hasn't been checked recently: ask staff.`);
+      if (!reportable && isCurrent(item, now)) lines.push(`No allergens are listed for ${name} in our menu data. That isn't a guarantee: please ask staff.`);
+      if (!isCurrent(item, now)) lines.push(`Allergen information for ${reportable || !severe ? cleanText(item.name) : "a dish you asked about"} hasn't been checked recently: ask staff.`);
       if (contains.length || may.length) listed.push(item);
     }
   } else if (named.length > 0) {

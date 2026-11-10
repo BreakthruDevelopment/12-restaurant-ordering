@@ -32,8 +32,24 @@ export const CONSTRAINT_QUESTIONS: string[] = [
   "squid ink pasta", "clams?", "mussels", "scallops", "legumes", "legume free", "pesto pasta", "Weizen?", "Milch?", "Eier", "Fisch", "latte?", "uova", "glutine",
 ];
 
-/** General questions that must stay general (the model path is the narrow exception, but these are plainly not constraints). */
-export const GENERAL_QUESTIONS: string[] = ["kid friendly?", "spicy?", "under $15", "What comes with the burger?", "what's popular?"];
+/** Round 3 re-review: demo-path failures, the lexicon additions, and questions with words outside the general vocabulary. */
+export const ROUND3_QUESTIONS: string[] = [
+  "my son carries an auto-injector, what do you recommend", "my son carries an autoinjector what is good", "is there paneer in the curry", "is there dashi in the soup",
+  "is there miso in it", "is there semolina in the pasta", "is there barley in the soup", "does the soup have barley", "any barley in the soup", "have any couscous?",
+  "are there peanuts", "does it have bread", "do they have any rye", "what's in the custard tart", "is the paneer curry made with cream",
+  ..."epinephrine adrenaline injector auvi epipen paneer ricotta mozzarella parmesan feta custard meringue aioli brioche dashi bonito miso edamame tempeh tamari shoyu semolina couscous seitan spelt barley rye malt bulgur durum panko bread pasta batter tempura chestnut buckwheat problem condition doctor medical stomach diet vegan keto halal kosher pregnant FODMAP IBS".split(" "),
+  // false positives the reviewers saw: acceptable, they go to ask-staff
+  "no rush, what's popular", "not too hungry, what's light", "what can I eat for under $15",
+  // words outside the fixed general vocabulary
+  "what's the wifi password", "do you take reservations", "recommend something for my grandmother", "what is the chef's story", "tell me a joke", "what's good for a date night",
+  "recommend something low fat", "anything for a toddler", "something for my diabetic father", "what do you suggest for someone on antibiotics",
+];
+
+/** General questions that must stay general: every word is on the fixed vocabulary. */
+export const GENERAL_QUESTIONS: string[] = [
+  "spicy?", "under $15", "what's popular?", "what's spicy", "cheapest", "dessert", "drinks", "kids", "kid friendly?", "Anything spicy under $15?",
+  "what's the best dessert", "what drinks do you have", "what do you recommend", "what's the most popular dish", "something quick and cheap", "what's good to share",
+];
 
 /** Model answers that make or smuggle a claim: none may come back as `general` or `demo` model text. */
 export const CLAIM_ANSWERS: string[] = [

@@ -1,9 +1,9 @@
 import { generate as defaultGenerate } from "@/lib/ai";
 import { AiError } from "@/lib/ai/types";
-import { ASSISTANT_FOOTER, type AssistantItem, routeQuestion } from "@/lib/allergen-router";
-import { type AssistantReply, allergenReply, guardModelOutput } from "@/lib/allergen-guardrails";
+import { type AssistantItem, isTimeQuestion, menuWordsOf, routeQuestion } from "@/lib/allergen-router";
+import { type AssistantReply, allergenReply, reply as makeReply, renderGeneral } from "@/lib/allergen-guardrails";
 import { log } from "@/lib/log";
-import { MENU_QA_SYSTEM, MENU_QA_TASK, buildMenuQaPrompt, demoCanAnswer, menuQaOutput } from "@/lib/menu-qa";
+import { MENU_QA_SYSTEM, MENU_QA_TASK, availableItems, buildMenuQaPrompt, menuQaOutput } from "@/lib/menu-qa";
 
 /**
  * The menu assistant without the database: route the question, answer allergen questions deterministically, send
@@ -18,33 +18,43 @@ export type AssistantMeta = {
 
 type GenerateFn = typeof defaultGenerate;
 
+/** Wait times and opening hours: fixed text, never dish suggestions. */
+export function timeReply(pickupMinutes?: number): AssistantReply {
+  const wait = pickupMinutes ? ` Pickup orders are usually ready in about ${pickupMinutes} minutes.` : "";
+  return makeReply("general", `Wait times depend on how busy we are.${wait} Your order page shows an estimated pickup time once you order. For opening hours, please ask staff.`, [], false);
+}
+
+/** Whether this question will call a model: general mode, not a wait-time question, and at least one available dish. */
+export function needsModel(question: string, menu: readonly AssistantItem[]): boolean {
+  return routeQuestion(question, { menuWords: menuWordsOf(menu) }).mode === "general" && !isTimeQuestion(question) && availableItems(menu).length > 0;
+}
+
 export async function answerQuestion(
   question: string,
   menu: readonly AssistantItem[],
-  deps: { generate?: GenerateFn; now?: Date } = {},
+  deps: { generate?: GenerateFn; now?: Date; pickupMinutes?: number } = {},
 ): Promise<{ reply: AssistantReply; meta: AssistantMeta }> {
-  const route = routeQuestion(question);
-  // Allergen mode: no model, ever.
+  const route = routeQuestion(question, { menuWords: menuWordsOf(menu) });
+  // Allergen mode (and anything outside the general vocabulary): no model, ever.
   if (route.mode === "allergen") return { reply: allergenReply(question, menu, "allergen", deps.now), meta: { model: "none" } };
+  if (isTimeQuestion(question)) return { reply: timeReply(deps.pickupMinutes), meta: { model: "none" } };
 
   const { prompt, refs } = buildMenuQaPrompt(question, menu);
   if (refs.size === 0) {
-    return { reply: { mode: "guardrail", answer: "There are no dishes available to talk about right now. Please ask staff.", items: [], footer: ASSISTANT_FOOTER, demo: false }, meta: { model: "none" } };
+    return { reply: makeReply("guardrail", "There are no dishes available to talk about right now. Please ask staff.", [], false), meta: { model: "none" } };
   }
 
   const gen = deps.generate ?? defaultGenerate;
   try {
-    const result = await gen({ task: MENU_QA_TASK, system: MENU_QA_SYSTEM, prompt, schema: menuQaOutput, maxOutputTokens: 400 });
-    // A recorded answer can't read the question: serve it only for plainly general topics, else flag it so it becomes "ask staff".
-    const data = result.demo && !demoCanAnswer(question) ? { ...result.data, mentionsAllergyOrDiet: true } : result.data;
-    const reply = guardModelOutput(data, { question, menu, refs, demo: result.demo, now: deps.now });
+    const result = await gen({ task: MENU_QA_TASK, system: MENU_QA_SYSTEM, prompt, schema: menuQaOutput, maxOutputTokens: 100 });
+    const reply = renderGeneral(result.data, { question, menu, refs, demo: result.demo, now: deps.now });
     return { reply, meta: { model: result.demo ? "demo" : "live" } };
   } catch (err) {
     if (!(err instanceof AiError)) throw err;
     // `generate()` has already logged the failure (task, provider, kind; never the prompt).
     log.warn("assistant.model_unavailable", { task: MENU_QA_TASK, kind: err.kind });
     return {
-      reply: { mode: "guardrail", answer: "I couldn't answer that just now. Please ask staff, or look through the menu.", items: [], footer: ASSISTANT_FOOTER, demo: false },
+      reply: makeReply("guardrail", "I couldn't answer that just now. Please ask staff, or look through the menu.", [], false),
       meta: { model: "failed" },
     };
   }

@@ -6,23 +6,20 @@ import {
   cleanText,
   deleet,
   normalizeText,
-  scanLexicon,
 } from "@/lib/allergen-router";
-import type { MenuQaOutput } from "@/lib/menu-qa";
+import type { MenuQaOutput, MenuQaReason } from "@/lib/menu-qa";
 
 /**
- * Guardrails for the general-mode model answer (spec 12, guardrails 1 to 5). The model is never trusted: its answer
- * reaches a customer only if every check below passes, and any doubt about safety is answered by the deterministic
- * `allergenAnswer()` instead. Pure module (no database, no model).
+ * What a customer can receive from a general-mode (model) answer, and nothing else. The model's output is only
+ * `{refs, reason}` (menu-qa.ts): the server writes the reply from a fixed template per reason, with dish names and
+ * prices from the database. So no free model text ever reaches a customer, and there is no claim filter to defeat.
  *
- *   1. The model flagged allergies or diets            -> allergenAnswer()
- *   2. The answer touches the allergen lexicon          -> allergenAnswer()
- *   3. The answer makes a safety claim (list below)     -> allergenAnswer()
- *      Also here: letters outside the Latin script, spaced-out letters and text that doesn't read as English, because
- *      the claim list is English and an answer in another language could slip past it.
- *   4. Refs must exist and be available (else dropped); prices must equal a referenced dish's price; links and
- *      unknown refs in the text are refused  -> neutral list of the referenced dishes with database prices
- *   5. The footer is part of every reply (`ASSISTANT_FOOTER`); the UI never colours or ticks anything.
+ *   - refs must exist and be available, at most 3, and obey what the question says (a price cap) or the reason says
+ *     (spicy needs the spicy tag); anything else is dropped;
+ *   - a dish whose own name reads as a claim ("Gluten-Free Rice Bowl", "Nut Free Brownie") is dropped;
+ *   - the reply always says "Ask staff about allergies." and carries the footer; the UI never colours or ticks anything.
+ * Everything about allergies, diets and ingredients is answered by `allergenAnswer()` and never gets here: the router
+ * only lets a question through when every word is on a fixed general vocabulary. Pure module (no database, no model).
  */
 
 export type AssistantMode = "allergen" | "general" | "guardrail" | "demo";
@@ -80,116 +77,64 @@ export function containsSafetyClaim(text: string): boolean {
   });
 }
 
-/** Four or more single characters in a row: "s a f e", "n 0 n u t s". */
-const SPELLED_OUT = /(?:^| )[a-z0-9](?: [a-z0-9]){3,}(?: |$)/;
 
-const ENGLISH_WORDS = new Set(
-  ("the a an and or of to in on for with is are it its this that these those we you your our they there here have has can be any at by from as if so but i me my what which some more most also ask staff menu dish dishes try like popular option options available about up all one two than under over per each serve serves served offer offers include includes made comes come really good very cost costs price priced spicy hot mild kids lunch dinner drink drinks dessert starter side special specials best favourite favorite tasty delicious hearty fresh crispy cheap cheapest pick picks choice").split(" "),
-);
-
-/** ASCII letters, digits and punctuation, plus the usual typographic quotes and dashes. Nothing else may reach a customer from a model. */
-const PLAIN_ASCII = /^[\x20-\x7e\n\t‘’“”–—… ]*$/;
-
-/**
- * The claim list is English, so a model answer must be plain ASCII English or it is refused: no accented or non-Latin
- * letters (look-alikes, other languages), no spelled-out letters ("s a f e"), and every answer, however short, needs
- * some English function words.
- */
-export function looksLikeEnglishText(text: string): boolean {
-  if (!PLAIN_ASCII.test(text)) return false;
-  const norm = normalizeText(text);
-  if (SPELLED_OUT.test(norm) || SPELLED_OUT.test(normalizeText(deleet(text.toLowerCase())))) return false;
-  const tokens = norm.split(" ").filter((t) => t && !/^\d+$/.test(t) && !/^m\d{1,3}$/.test(t));
-  if (tokens.length === 0) return true;
-  return tokens.filter((t) => ENGLISH_WORDS.has(t)).length / tokens.length >= 0.15;
-}
-
-const REF_TOKEN = /\bM(\d{1,3})\b/gi;
-const LINK = /https?:|www\.|\w\.(?:com|net|org|io|ai|co|app|dev)\b|@\w|\bdot\s*(?:com|net|org|io|ai|co|app|dev)\b|\bat\s+\w+\s+dot\b/i;
-const NUMBER_WORDS = /\b(?:dollars?|bucks?|cents?|euros?|pounds?|ten|eleven|twelve|(?:thir|four|fif|six|seven|eigh|nine)teen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|fiver|tenner|quid)\b/i;
-const SPELLED_DIGITS = /\b(?:(?:oh|zero|one|two|three|four|five|six|seven|eight|nine)[ -]+){3,}/i;
-
-const MONEY_PATTERNS: readonly RegExp[] = [
-  /[$€£]\s?(\d[\d,]*(?:\.\d+)?)/g,
-  /(\d[\d,]*(?:\.\d+)?)\s?(?:dollars?|bucks|usd|eur|euros?|gbp|pounds?)\b/gi,
-  /\b(?:usd|eur|gbp)\s?(\d[\d,]*(?:\.\d+)?)/gi,
-  /\b(\d+\.\d{2})\b/g,
-];
-const OTHER_CURRENCY = /[€£]|\b(?:eur|euros?|gbp|pounds?)\b/i;
-
-/** Every price-like amount in the answer, in cents. */
-export function amountsInCents(text: string): number[] {
-  const out: number[] = [];
-  for (const re of MONEY_PATTERNS) for (const m of text.matchAll(re)) out.push(Math.round(parseFloat(m[1].replace(/,/g, "")) * 100));
-  return out;
-}
-
-/** A capitalised word in the middle of a sentence is probably a dish name the model made up: refuse. */
-function hasInventedName(text: string): boolean {
-  const words = text.split(/\s+/);
-  return words.some((w, i) => {
-    if (i === 0 || /[.!?:]["')]*$/.test(words[i - 1]) || w === "I") return false;
-    return /^[("']?[A-Z][a-z]/.test(w);
-  });
-}
-
-const moneyText = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 const toItem = (i: AssistantItem): ReplyItem => ({ id: i.id, name: cleanText(i.name), priceCents: i.priceCents });
+const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
-function reply(mode: AssistantMode, answer: string, items: ReplyItem[], demo: boolean): AssistantReply {
+export function reply(mode: AssistantMode, answer: string, items: ReplyItem[], demo: boolean): AssistantReply {
   return { mode, answer, items, footer: ASSISTANT_FOOTER, demo };
 }
 
-/** The deterministic allergen answer as a reply. `mode` is "allergen" for a routed question, "guardrail" for a replaced model answer. */
+/** The deterministic allergen answer as a reply. `mode` is "allergen" for a routed question, "guardrail" for a refusal. */
 export function allergenReply(question: string, menu: readonly AssistantItem[], mode: "allergen" | "guardrail", now?: Date): AssistantReply {
   const a = allergenAnswer(question, menu, { now, reason: mode === "guardrail" ? "guardrail" : "question" });
   return reply(mode, a.text, a.items, false);
 }
 
-function neutralReply(items: readonly AssistantItem[]): AssistantReply {
-  const text = items.length
-    ? `Here is what I found on the menu: ${items.map((i) => `${cleanText(i.name)} (${moneyText(i.priceCents)})`).join(", ")}. Ask staff about anything else.`
-    : "I couldn't match that to specific dishes. Please browse the menu or ask staff.";
-  return reply("guardrail", text, items.map(toItem), false);
+/** Every sentence a general answer can contain besides dish names and prices. The property test pins this set. */
+export const GENERAL_TEMPLATES: Record<MenuQaReason, string> = {
+  popular: "Popular picks",
+  spicy: "Spicy picks",
+  mild_heat: "Milder picks",
+  budget: "Budget picks",
+  quick: "Quick picks",
+  kid_friendly: "Picks to try with kids",
+  shareable: "Dishes to share",
+  dessert: "Dessert picks",
+  drink: "Drink picks",
+  other: "Dishes you might like",
+};
+export const GENERAL_CLOSING = "Ask staff about allergies.";
+export const DEMO_PREFIX = "Demo answer (recorded sample).";
+export const NO_MATCH_TEXT = "I couldn't find a good match for that. Please browse the menu or ask staff.";
+
+/** "under $15", "below 12", "less than $9.50", "$15 or less": a price cap in cents, from the customer's question only. */
+export function priceCapCents(question: string): number | null {
+  const q = question.toLowerCase();
+  const m = q.match(/(?:under|below|less than|up to|within|max(?:imum)?|cheaper than)\s*\$?\s*(\d{1,4}(?:\.\d{1,2})?)/) ?? q.match(/\$\s*(\d{1,4}(?:\.\d{1,2})?)\s*(?:or less|or under|max)/);
+  return m ? Math.round(parseFloat(m[1]) * 100) : null;
 }
 
 /**
- * Turn the model's output into the reply the customer sees. Never throws; every failure path is a deterministic reply.
- * A demo answer (from the recorded fixture) goes through exactly the same checks. The claim checks run twice: on the
- * model's text, and again on the FINAL text after dish names are substituted for refs, so a dish called
- * "Gluten-Free Rice Bowl" can't smuggle a claim in. A dish name that merely contains an allergen word ("Peanut Butter
- * Brownie") is fine: the lexicon runs on the model's text only.
+ * Render a general-mode answer. Never throws, never returns model text. A demo answer (the recorded fixture, same
+ * `{refs, reason}` shape) goes through exactly the same code.
  */
-export function guardModelOutput(out: MenuQaOutput, ctx: GuardContext): AssistantReply {
-  const replaceWithAllergenAnswer = () => allergenReply(ctx.question, ctx.menu, "guardrail", ctx.now);
-  // What the customer would see if nothing else changed: angle brackets and control characters gone, so "sa<fe" is "safe".
-  const cleaned = cleanText(out.answer);
-
-  // 1. The model says the question concerns allergies or diets.
-  if (out.mentionsAllergyOrDiet) return replaceWithAllergenAnswer();
-  // 2 and 3. English-only plain text, the allergen lexicon, and the refusal filter, on the raw and the cleaned text.
-  for (const text of [out.answer, cleaned]) {
-    if (!looksLikeEnglishText(text) || scanLexicon(text).hit || containsSafetyClaim(text)) return replaceWithAllergenAnswer();
+export function renderGeneral(out: MenuQaOutput, ctx: GuardContext): AssistantReply {
+  const cap = priceCapCents(ctx.question);
+  const picked: AssistantItem[] = [];
+  for (const ref of out.refs) {
+    const item = ctx.refs.get(ref);
+    if (!item || picked.includes(item)) continue;
+    if (cap !== null && item.priceCents > cap) continue;
+    if (out.reason === "spicy" && !item.dietaryTags.includes("spicy")) continue;
+    // A dish whose own name reads as a claim is not suggested.
+    if (containsSafetyClaim(cleanText(item.name))) continue;
+    picked.push(item);
+    if (picked.length === 3) break;
   }
-
-  // 4. Refs: the model's list is filtered to real, available dishes; refs written in the text must be real too, and
-  // there must be at least one, so the answer is about dishes that exist.
-  const listed = out.itemRefs.filter((r) => ctx.refs.has(r));
-  const inText = [...cleaned.matchAll(REF_TOKEN)].map((m) => `M${Number(m[1])}`);
-  const valid = [...new Set([...listed, ...inText.filter((r) => ctx.refs.has(r))])].map((r) => ctx.refs.get(r) as AssistantItem);
-  if (inText.length === 0 || inText.some((r) => !ctx.refs.has(r))) return neutralReply(valid);
-  if (LINK.test(cleaned) || NUMBER_WORDS.test(cleaned) || SPELLED_DIGITS.test(cleaned) || hasInventedName(cleaned)) return neutralReply(valid);
-
-  // Digits: only refs and exact menu prices of the referenced dishes may appear.
-  const prices = new Set(valid.map((i) => i.priceCents));
-  if (OTHER_CURRENCY.test(cleaned) || amountsInCents(cleaned).some((c) => !prices.has(c))) return neutralReply(valid);
-  let rest = cleaned.replace(REF_TOKEN, " ");
-  for (const re of MONEY_PATTERNS) rest = rest.replace(re, " ");
-  if (/\d/.test(rest)) return neutralReply(valid);
-
-  const final = cleanText(cleaned.replace(REF_TOKEN, (_m, n: string) => ctx.refs.get(`M${Number(n)}`)?.name ?? ""));
-  if (!final) return neutralReply(valid);
-  // The final text, with the dish names in it, must still be free of claims.
-  if (containsSafetyClaim(final)) return replaceWithAllergenAnswer();
-  return reply(ctx.demo ? "demo" : "general", final, valid.slice(0, 5).map(toItem), ctx.demo);
+  if (picked.length === 0) return reply("guardrail", NO_MATCH_TEXT, [], false);
+  const heading = GENERAL_TEMPLATES[out.reason] + (cap !== null ? ` under ${money(cap)}` : "");
+  const list = picked.map((i) => `${cleanText(i.name)} (${money(i.priceCents)})`).join(", ");
+  const text = `${ctx.demo ? `${DEMO_PREFIX} ` : ""}${heading}: ${list}. ${GENERAL_CLOSING}`;
+  return reply(ctx.demo ? "demo" : "general", text, picked.map(toItem), ctx.demo);
 }

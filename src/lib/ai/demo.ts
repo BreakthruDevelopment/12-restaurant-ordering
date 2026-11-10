@@ -6,15 +6,13 @@ import type { DemoToolScript } from "./types";
  * Each app adds a fixture for each AI task it defines.
  */
 export const demoFixtures: Record<string, unknown> = {
-  // Menu assistant, general mode only (issue 12.3). M1 and M2 are the first two available dishes of the request, so the
-  // fixture always points at real dishes, and the text names them by ref (the guardrails require one). The fixture can't
-  // read the question, so the app only serves it for plainly general topics (`demoCanAnswer` in menu-qa.ts) and flags
-  // everything else mentionsAllergyOrDiet: true, which turns it into the ask-staff answer. Allergen questions never
-  // reach a model, in demo mode or any other. The wording avoids every refusal token ("no", "not", "free", ...).
+  // Menu assistant, general mode only (issue 12.3). The model's whole output is `{refs, reason}`: the server writes the reply
+  // from a template with database names and prices, so the fixture has no text to get wrong. M1 and M2 are the first two
+  // available dishes of the request, so it always points at real dishes. The router only lets a question reach it when
+  // every word is on the fixed general vocabulary; allergen, diet and ingredient questions never reach a model.
   "menu-qa": {
-    answer: "Demo answer (recorded sample): try M1 or M2, two dishes guests often order. Ask staff about anything else.",
-    itemRefs: ["M1", "M2"],
-    mentionsAllergyOrDiet: false,
+    refs: ["M1", "M2"],
+    reason: "popular",
   },
   "summarize-items": {
     summary:

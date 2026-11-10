@@ -3,8 +3,7 @@ import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { assertCanAskAssistant } from "@/lib/access";
 import { type AssistantReply } from "@/lib/allergen-guardrails";
-import { routeQuestion } from "@/lib/allergen-router";
-import { answerQuestion } from "@/lib/assistant-core";
+import { answerQuestion, needsModel } from "@/lib/assistant-core";
 import type { Actor } from "@/lib/auth/rbac";
 import { db } from "@/lib/db";
 import { env } from "@/lib/env";
@@ -54,8 +53,9 @@ export async function askMenuAssistant(actor: Actor, input: unknown): Promise<As
   assertCanAskAssistant(actor);
   const { question } = askInput.parse(input);
   const started = Date.now();
-  const general = routeQuestion(question).mode === "general";
-  const reserve = general && liveModelConfigured();
+  const publicMenu = await getPublicMenu();
+  const dishes = publicMenu.categories.flatMap((c) => c.items);
+  const reserve = needsModel(question, dishes) && liveModelConfigured();
 
   await db().transaction(async (tx) => {
     await consumeRate(tx, actor.id, "qa", QA_PER_HOUR, RATE_MESSAGE);
@@ -65,7 +65,7 @@ export async function askMenuAssistant(actor: Actor, input: unknown): Promise<As
 
   let outcome: Awaited<ReturnType<typeof answerQuestion>>;
   try {
-    outcome = await answerQuestion(question, (await getPublicMenu()).categories.flatMap((c) => c.items));
+    outcome = await answerQuestion(question, dishes, { pickupMinutes: publicMenu.pickupMinutes });
   } catch (err) {
     // The work never happened: give back what it cost.
     await db().transaction(async (tx) => {

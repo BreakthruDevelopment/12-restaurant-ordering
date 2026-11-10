@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Allergen } from "@/lib/db/schema";
-import { CONSTRAINT_QUESTIONS, GENERAL_QUESTIONS } from "../../test/review-cases";
-import { type AssistantItem, allergenAnswer, namedItems, normalizeText, routeQuestion, scanLexicon } from "./allergen-router";
+import { CONSTRAINT_QUESTIONS, GENERAL_QUESTIONS, ROUND3_QUESTIONS } from "../../test/review-cases";
+import { type AssistantItem, allergenAnswer, isTimeQuestion, menuWordsOf, namedItems, normalizeText, routeQuestion, scanLexicon } from "./allergen-router";
 
 /** Allergen mode: the router must send these to the deterministic path. Second column: allergens it should recognise (subset check). */
 const ALLERGEN_PHRASINGS: [string, Allergen[]][] = [
@@ -98,34 +98,17 @@ const ALLERGEN_PHRASINGS: [string, Allergen[]][] = [
 
 /** General mode: nothing here touches an allergen, so the model path may answer them. */
 const GENERAL_PHRASINGS: string[] = [
-  "What's spicy?",
-  "What comes with the burger?",
-  "Something for kids?",
-  "Anything spicy under $15?",
-  "What are your most popular dishes?",
-  "How long is pickup?",
-  "How many minutes until my order is ready?",
-  "Tell me about the soup",
-  "What drinks do you have?",
-  "Which dessert is the best?",
-  "What's the cheapest main?",
-  "Do you have something light?",
-  "What should I order for two people?",
-  "Is the ramen spicy?",
-  "What's better, the ramen or the pad thai?",
-  "Where do I pick up my order?",
-  "What time do you open?",
-  "How big is the portion?",
-  "What are today's specials?",
-  "Recommend a starter",
-  "Quel plat est le plus populaire ?",
-  "What's the price of the katsu curry?",
-  "Is there anything hot and filling?",
-  "Which bowls come with rice?",
-  "Do you have a kids menu",
-  "What is a good side for the teriyaki?",
-  "Can I get my order in 10 minutes?",
-  "What's the wait right now?",
+  "What's spicy?", "Anything spicy under $15?", "What are your most popular dishes?", "How long is pickup?", "What drinks do you have?", "Which dessert is the best?",
+  "What's the cheapest main?", "Do you have something light?", "Recommend a starter", "What's the wait right now?", "What time do you open?", "Tell me about the soup",
+  "Is the soup popular?", "What's the best seller?", "what do you recommend", "something cheap and quick", "kid friendly?", "what's good for kids", "what's sweet?",
+  "What are today's specials?", "cheapest dessert under $8", "what's the price of the pad thai", "which noodles are popular", "what's good to share",
+];
+
+/** Questions with a word outside the fixed general vocabulary (or the menu's dish-name words) go to the ask-staff answer. */
+const OUTSIDE_VOCABULARY: string[] = [
+  "What comes with the burger?", "How many minutes until my order is ready?", "What should I order for two people?", "Is the ramen spicy?", "Quel plat est le plus populaire ?",
+  "What's the price of the katsu curry?", "Is there anything hot and filling?", "Which bowls come with rice?", "What is a good side for the teriyaki?",
+  "What's better, the ramen or the pad thai?", "what's the wifi password", "do you take reservations", "tell me a joke", "recommend something for my grandmother",
 ];
 
 describe("allergen router: phrasings that must reach the deterministic answer", () => {
@@ -143,8 +126,22 @@ describe("allergen router: every question from the PR review reaches the determi
   it.each(CONSTRAINT_QUESTIONS)("routes %j to allergen mode", (q) => {
     expect(routeQuestion(q).mode).toBe("allergen");
   });
+  it.each(ROUND3_QUESTIONS)("round 3: routes %j to allergen mode", (q) => {
+    expect(routeQuestion(q).mode).toBe("allergen");
+  });
+  it("auto-injector wording is severe", () => {
+    for (const q of ["my son carries an auto-injector, what do you recommend", "epinephrine", "adrenaline pen", "Auvi-Q"]) expect(routeQuestion(q).severe, q).toBe(true);
+  });
+  it("breads and grains map to wheat and gluten, dairy and egg foods to their allergen", () => {
+    expect(routeQuestion("is there semolina").allergens).toEqual(expect.arrayContaining(["wheat", "gluten"]));
+    expect(routeQuestion("paneer").allergens).toContain("milk");
+    expect(routeQuestion("dashi").allergens).toContain("fish");
+    expect(routeQuestion("miso").allergens).toContain("soy");
+    expect(routeQuestion("aioli").allergens).toContain("egg");
+    expect(routeQuestion("chestnut").allergens).toContain("tree_nuts");
+  });
   it("keeps plainly general questions general", () => {
-    for (const q of GENERAL_QUESTIONS) expect(routeQuestion(q).mode).toBe("general");
+    for (const q of GENERAL_QUESTIONS) expect(routeQuestion(q, { menuWords: new Set() }).mode, q).toBe("general");
   });
   it("sends anything with non-Latin letters to the ask-staff answer", () => {
     for (const q of ["ピーナッツ", "what is 花生", "Привет menu", "pеanut"]) {
@@ -159,11 +156,33 @@ describe("allergen router: every question from the PR review reaches the determi
   });
 });
 
-describe("allergen router: general questions stay general", () => {
+describe("allergen router: only a whole-question allowlist reaches general mode", () => {
+  const menuWords = menuWordsOf(MENU_FOR_ROUTING());
   it.each(GENERAL_PHRASINGS)("routes %j to general mode", (question) => {
-    expect(routeQuestion(question).mode).toBe("general");
+    expect(routeQuestion(question, { menuWords }).mode).toBe("general");
+  });
+  it.each(OUTSIDE_VOCABULARY)("routes %j to the ask-staff answer", (question) => {
+    expect(routeQuestion(question, { menuWords }).mode).toBe("allergen");
+  });
+  it("a dish-name word on the current menu is allowed, one that is not on the menu is not", () => {
+    expect(routeQuestion("tell me about the ramen", { menuWords: menuWordsOf([{ name: "Spicy Miso Ramen" }]) }).mode).toBe("general");
+    expect(routeQuestion("tell me about the ramen").mode).toBe("allergen");
+  });
+  it("allergen words win over the allowlist even when they are dish-name words", () => {
+    expect(routeQuestion("tell me about the peanut butter brownie", { menuWords: menuWordsOf([{ name: "Peanut Butter Brownie" }]) }).mode).toBe("allergen");
+  });
+  it("needs at least one topic word, and numbers are fine", () => {
+    expect(routeQuestion("what do you have").mode).toBe("allergen");
+    expect(routeQuestion("under 15").mode).toBe("general");
+  });
+  it("recognises wait-time and opening-hours questions", () => {
+    for (const q of ["how long is the wait", "what time do you open", "pickup time?", "opening hours"]) expect(isTimeQuestion(q)).toBe(true);
+    expect(isTimeQuestion("what's popular")).toBe(false);
   });
 });
+function MENU_FOR_ROUTING() {
+  return [{ name: "Pad Thai" }, { name: "Almond Cookie" }, { name: "Miso Soup" }];
+}
 
 describe("severe words", () => {
   it.each(["I'm celiac", "my daughter has anaphylaxis", "I carry an epipen", "I have an epi-pen", "severe peanut allergy", "coeliac disease", "celiak here"])("flags %j as severe", (q) => {

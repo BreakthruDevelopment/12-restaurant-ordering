@@ -22,8 +22,8 @@ vi.mock("@/lib/ai", async (importOriginal) => {
   };
 });
 
-const liveAnswer = (answer: string, itemRefs: string[] = ["M1"]) => async () => ({
-  data: { answer, itemRefs, mentionsAllergyOrDiet: false },
+const liveAnswer = (refs: string[] = ["M1"], reason = "popular") => async () => ({
+  data: { refs, reason },
   provider: "stub",
   model: "stub",
   demo: false,
@@ -131,7 +131,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("spends one model call per live general question and refuses past QA_DAILY_CAP, while allergen answers keep working", async () => {
     live("2");
-    model.impl = liveAnswer("Try M1 for a hot lunch.");
+    model.impl = liveAnswer();
     expect((await ask(customer, { question: "what is hot?" })).mode).toBe("general");
     expect((await ask(customer, { question: "what is filling?" })).mode).toBe("general");
     expect(await dailyAi()).toBe(2);
@@ -145,7 +145,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("is safe under a race: 10 parallel live questions with a cap of 3 make exactly 3 model calls", async () => {
     live("3");
-    model.impl = liveAnswer("Try M1 for a hot lunch.");
+    model.impl = liveAnswer();
     const results = await Promise.allSettled(Array.from({ length: 10 }, () => ask(customer2, { question: "what is hot?" })));
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(3);
     expect(model.calls).toBe(3);
@@ -154,7 +154,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("gives the reservation back when the live call fell back to the demo fixture or failed", async () => {
     live("5");
-    model.impl = async () => ({ data: { answer: "Demo answer (recorded sample): try M1.", itemRefs: ["M1"], mentionsAllergyOrDiet: false }, provider: "demo", model: "recorded", demo: true, latencyMs: 1 });
+    model.impl = async () => ({ data: { refs: ["M1"], reason: "popular" }, provider: "demo", model: "recorded", demo: true, latencyMs: 1 });
     expect((await ask(customer, { question: "what is hot?" })).mode).toBe("demo");
     expect(await dailyAi()).toBe(0);
     const { AiError } = await import("@/lib/ai/types");
@@ -177,14 +177,35 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
     expect(await qaEvents(customer.id)).toBe(0);
   });
 
-  it("replaces a model answer that claims safety (mode guardrail) and counts it as such", async () => {
+  it("renders a live answer from the template with database names and prices, and counts it as general", async () => {
     live();
-    model.impl = liveAnswer("M2 is safe for dairy allergies", ["M2"]);
+    model.impl = liveAnswer(["M1", "M2"], "popular");
     const r = await ask(customer, { question: "what sides do you have?" });
-    expect(r.mode).toBe("guardrail");
-    expect(r.answer).not.toContain("safe for dairy");
-    expect(r.answer).toContain("We can't guarantee any dish is free of an allergen.");
-    expect(await stat("guardrail")).toBe(1);
+    expect(r.mode).toBe("general");
+    expect(r.answer).toMatch(/^Popular picks: .+ \(\$\d+\.\d{2}\)(?:, .+ \(\$\d+\.\d{2}\))?\. Ask staff about allergies\.$/);
+    expect(await stat("general")).toBe(1);
+  });
+
+  it("a question outside the general vocabulary never reserves or calls the model, even with a live provider", async () => {
+    live();
+    model.impl = liveAnswer();
+    const r = await ask(customer, { question: "my son carries an auto-injector, what do you recommend" });
+    expect(r.mode).toBe("allergen");
+    expect(model.calls).toBe(0);
+    expect(await dailyAi()).toBe(0);
+    expect((await ask(customer, { question: "what is the wifi password" })).mode).toBe("allergen");
+    expect(model.calls).toBe(0);
+  });
+
+  it("answers wait-time questions with fixed text including the restaurant's pickup minutes, no model", async () => {
+    live();
+    model.impl = liveAnswer();
+    const r = await ask(customer, { question: "how long is the wait?" });
+    expect(r.mode).toBe("general");
+    expect(r.answer).toContain("minutes");
+    expect(r.items).toEqual([]);
+    expect(model.calls).toBe(0);
+    expect(await dailyAi()).toBe(0);
   });
 
   it("sends the model only available dishes, as data, never a sold-out dish or the declared allergens", async () => {
@@ -192,7 +213,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
     let prompt = "";
     model.impl = async (req) => {
       prompt = req.prompt;
-      return liveAnswer("Try M1 for lunch.")();
+      return liveAnswer()();
     };
     await ask(customer, { question: "what is hot?" });
     expect(prompt).toContain("<menu_data>");
@@ -216,12 +237,12 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
 
   it("never logs or stores the question text", async () => {
     live();
-    model.impl = liveAnswer("Try M1 for a hot lunch.");
+    model.impl = liveAnswer();
     const lines: string[] = [];
     for (const m of ["log", "error", "warn", "info", "debug"] as const) vi.spyOn(console, m).mockImplementation((...a: unknown[]) => void lines.push(a.map(String).join(" ")));
     vi.stubEnv("LOG_LEVEL", "debug");
     const canaryAllergen = "CANARYQ-allergic to zucchini and peanuts";
-    const canaryGeneral = "CANARYQ-what is hot today";
+    const canaryGeneral = "what is hot today";
     await ask(customer, { question: canaryAllergen });
     await ask(customer, { question: canaryGeneral });
     await expect(ask(customer, { question: `CANARYQ-${"x".repeat(400)}` })).rejects.toBeTruthy();
@@ -230,7 +251,7 @@ describe.skipIf(!url)("menu assistant (Postgres)", () => {
     };
     await ask(customer, { question: "CANARYQ-fail path" }).catch(() => undefined);
     expect(lines.length).toBeGreaterThan(0); // logging is on, and it is not leaking
-    expect(lines.join("\n")).not.toMatch(/CANARYQ|zucchini/i);
+    expect(lines.join("\n")).not.toMatch(/CANARYQ|zucchini|what is hot today/i);
     const stored = await sql`select * from rate_event where user_id like 'qa-%'`;
     expect(JSON.stringify(stored)).not.toMatch(/CANARYQ/);
     expect(JSON.stringify(await sql`select * from assistant_stat`)).not.toMatch(/CANARYQ/);
