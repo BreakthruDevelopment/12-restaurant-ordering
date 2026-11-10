@@ -6,6 +6,14 @@ import type { DemoToolScript } from "./types";
  * Each app adds a fixture for each AI task it defines.
  */
 export const demoFixtures: Record<string, unknown> = {
+  // Menu assistant, general mode only (issue 12.3). M1 and M2 are the first two available dishes of the request, so the
+  // fixture always points at real dishes. Allergen questions never reach a model, in demo mode or any other.
+  "menu-qa": {
+    answer:
+      "Demo answer (recorded, not from a live model): here are two dishes guests often order. Ask staff about anything not covered here.",
+    itemRefs: ["M1", "M2"],
+    mentionsAllergyOrDiet: false,
+  },
   "summarize-items": {
     summary:
       "You have a few open items. The most recent ones focus on setup work; nothing looks overdue.",

@@ -77,6 +77,7 @@ describe.skipIf(!url)("HTTP routes (Better Auth + Postgres)", () => {
     R.transition = await import("@/app/api/orders/[id]/transition/route");
     R.ack = await import("@/app/api/orders/[id]/allergy-ack/route");
     R.stats = await import("@/app/api/admin/stats/route");
+    R.assistant = await import("@/app/api/assistant/route");
     R.demo = await import("@/app/api/admin/demo/route");
   });
   afterAll(async () => {
@@ -229,13 +230,52 @@ describe.skipIf(!url)("HTTP routes (Better Auth + Postgres)", () => {
     });
   });
 
+  describe("menu assistant route", () => {
+    const ask = (who: string, question: unknown, opts: { origin?: string | null; raw?: BodyInit } = {}) =>
+      call(R.assistant.POST, "POST", who, { question }, { path: "/api/assistant", ...opts });
+
+    it("needs a session (401) and our own Origin (403, checked first)", async () => {
+      expect((await ask("anon", "what is popular?")).status).toBe(401);
+      for (const origin of [null, "https://evil.example"]) expect((await ask("alice", "what is popular?", { origin })).status).toBe(403);
+      expect((await ask("anon", "x", { origin: "https://evil.example" })).status).toBe(403);
+    });
+
+    it("rejects an empty or over-long question, unknown fields, malformed JSON and big bodies", async () => {
+      expect((await ask("alice", "")).status).toBe(400);
+      expect((await ask("alice", "x".repeat(301))).status).toBe(400);
+      expect((await ask("alice", 42)).status).toBe(400);
+      expect((await call(R.assistant.POST, "POST", "alice", { question: "hi", extra: 1 }, { path: "/api/assistant" })).status).toBe(400);
+      expect((await call(R.assistant.POST, "POST", "alice", undefined, { path: "/api/assistant", raw: "{nope" })).status).toBe(400);
+      expect((await call(R.assistant.POST, "POST", "alice", undefined, { path: "/api/assistant", raw: JSON.stringify({ question: "x".repeat(40_000) }) })).status).toBe(413);
+    });
+
+    it("answers the spec's allergen question deterministically, for any signed-in role", async () => {
+      for (const who of ["alice", "sue", "ada"]) {
+        const res = await ask(who, "is the pad thai peanut free");
+        expect(res.status).toBe(200);
+        expect(Object.keys(res.body).sort()).toEqual(["answer", "demo", "footer", "items", "mode"]);
+        expect(res.body.mode).toBe("allergen");
+        expect(res.body.answer).toContain("Pad Thai: contains peanuts.");
+        expect(res.body.answer).toContain("We can't guarantee any dish is free of an allergen.");
+        expect(res.body.footer).toBe("Allergies? Ask staff before ordering.");
+      }
+    });
+
+    it("answers a general question from the recorded demo fixture when no model key is set", async () => {
+      const res = await ask("bob", "what is popular?");
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ mode: "demo", demo: true });
+      expect(res.body.items.length).toBe(2);
+    });
+  });
+
   describe("admin routes", () => {
     it("stats are admin only and counts only", async () => {
       expect((await call(R.stats.GET, "GET", "ada")).status).toBe(200);
       for (const who of ["alice", "sue"]) expect((await call(R.stats.GET, "GET", who)).status).toBe(403);
       expect((await call(R.stats.GET, "GET", "anon")).status).toBe(401);
       const stats = (await call(R.stats.GET, "GET", "ada")).body;
-      expect(Object.keys(stats).sort()).toEqual(["ordersByDay", "soldOutItems", "users"]);
+      expect(Object.keys(stats).sort()).toEqual(["assistantByDay", "ordersByDay", "soldOutItems", "users"]);
     });
 
     it("the demo button is admin only (staff and customers 403)", async () => {

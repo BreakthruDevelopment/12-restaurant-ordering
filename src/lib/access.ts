@@ -41,3 +41,11 @@ export function assertStaff(actor: Actor): void {
 export function assertAdmin(actor: Actor): void {
   if (actor.role !== "admin") throw new ForbiddenError("Only administrators can do that.");
 }
+
+/**
+ * The menu assistant answers questions about the public menu and stores nothing, so any signed-in account may ask
+ * (customers, staff and admins). Anonymous visitors are stopped earlier, by `requireUser()`; an unknown role is refused here.
+ */
+export function assertCanAskAssistant(actor: Actor): void {
+  if (actor.role !== "user" && actor.role !== "staff" && actor.role !== "admin") throw new ForbiddenError("Sign in to ask the menu assistant.");
+}
