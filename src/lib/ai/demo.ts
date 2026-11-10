@@ -6,6 +6,14 @@ import type { DemoToolScript } from "./types";
  * Each app adds a fixture for each AI task it defines.
  */
 export const demoFixtures: Record<string, unknown> = {
+  // Menu assistant, general mode only (issue 12.3). The model's whole output is `{refs, reason}`: the server writes the reply
+  // from a template with database names and prices, so the fixture has no text to get wrong. M1 and M2 are the first two
+  // available dishes of the request, so it always points at real dishes. The router only lets a question reach it when
+  // every word is on the fixed general vocabulary; allergen, diet and ingredient questions never reach a model.
+  "menu-qa": {
+    refs: ["M1", "M2"],
+    reason: "popular",
+  },
   "summarize-items": {
     summary:
       "You have a few open items. The most recent ones focus on setup work; nothing looks overdue.",

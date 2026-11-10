@@ -39,6 +39,9 @@ const schema = z.object({
         return false;
       }
     }, "RESTAURANT_TZ must be an IANA time zone such as America/Chicago"),
+  // Model calls the menu assistant may make per UTC day, app-wide. Only counted when a live provider is configured:
+  // demo answers cost nothing and are never capped.
+  QA_DAILY_CAP: z.coerce.number().int().min(0).max(100_000).default(500),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 

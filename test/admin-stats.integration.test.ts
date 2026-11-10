@@ -53,7 +53,7 @@ describe.skipIf(!url)("admin counts (Postgres)", () => {
     const json = JSON.stringify(stats);
     for (const secret of ["Zebedee", "side door", "CANARY", "peanuts", "Pad Thai", placed.order.id, customer.id, "A-0"]) expect(json).not.toContain(secret);
     // Only numbers and day labels.
-    expect(Object.keys(stats).sort()).toEqual(["ordersByDay", "soldOutItems", "users"]);
+    expect(Object.keys(stats).sort()).toEqual(["assistantByDay", "ordersByDay", "soldOutItems", "users"]);
   });
 
   it("is for administrators only: staff and customers get 403, and the same admin gets 404 on order functions", async () => {

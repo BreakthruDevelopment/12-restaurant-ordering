@@ -8,7 +8,9 @@
 # Staff side (only with SMOKE_STAFF_EMAIL and SMOKE_STAFF_PASSWORD, seeded in CI by `pnpm db:seed`): the allergen
 # confirmation at checkout, an allergy-alert order can't be accepted before the acknowledgment (409), the staff
 # acknowledge, then accept; the allergen PUT needs verified: true.
-# Not covered yet: A's live stream (issue 12.2) and the menu assistant (issue 12.3); they add their own checks.
+# Menu assistant (always): sign-in and same-origin required, the 300-character cap, an allergen question answered in
+# allergen mode with the fixed notice and no safety claim, a general question answered. Not covered yet: A's live stream
+# (issue 12.2), which adds its own checks.
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
@@ -125,6 +127,24 @@ if [ -s "$JAR_C" ] && grep -q session "$JAR_C"; then
   expect 403 "sign-up with role staff must not give staff powers"
 fi
 pass "customers refused on staff endpoints; sign-up with a role stays a customer"
+
+# --- Menu assistant (issue 12.3) ------------------------------------------------------------------------------------
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"question":"hi"}' "$BASE_URL/api/assistant")
+[ "$code" = "401" ] || fail "anonymous assistant question should be 401, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: application/json' -H 'origin: https://evil.example' -d '{"question":"hi"}' "$BASE_URL/api/assistant")
+[ "$code" = "403" ] || fail "cross-origin assistant question should be 403, got $code"
+req POST /api/assistant "$JAR_A" "{\"question\":\"$(head -c 301 /dev/zero | tr '\0' 'x')\"}"
+expect 400 "assistant question over 300 characters"
+req POST /api/assistant "$JAR_A" '{"question":"is the pad thai peanut free"}'
+expect 200 "allergen question to the assistant"
+[ "$(json 'j.mode')" = "allergen" ] || fail "an allergen question must be answered in allergen mode: $BODY"
+[ "$(json 'j.answer.includes("We can\u0027t guarantee any dish is free of an allergen.")')" = "true" ] || fail "allergen answer lacks the fixed notice: $BODY"
+[ "$(json '/(is|are) (peanut|allergen).free|is safe|safe for/i.test(j.answer)')" = "false" ] || fail "allergen answer claims safety: $BODY"
+[ "$(json 'j.footer')" = "Allergies? Ask staff before ordering." ] || fail "assistant footer missing: $BODY"
+req POST /api/assistant "$JAR_A" '{"question":"what is popular here"}'
+expect 200 "general question to the assistant"
+[ "$(json '["general","demo","guardrail"].includes(j.mode) && j.answer.length > 0 && j.footer.length > 0')" = "true" ] || fail "unexpected general answer: $BODY"
+pass "menu assistant: sign-in and same-origin enforced, 300-character cap, allergen question answered deterministically with the notice and no safety claim"
 
 # --- Staff setup (optional) -----------------------------------------------------------------------------------------
 if [ -n "${SMOKE_STAFF_EMAIL:-}" ] && [ -n "${SMOKE_STAFF_PASSWORD:-}" ]; then

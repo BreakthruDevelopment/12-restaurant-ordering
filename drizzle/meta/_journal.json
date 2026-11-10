@@ -29,6 +29,13 @@
       "when": 1794331531650,
       "tag": "0003_restaurant_orders",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794332763006,
+      "tag": "0004_assistant-stat",
+      "breakpoints": true
     }
   ]
 }

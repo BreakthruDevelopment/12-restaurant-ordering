@@ -286,6 +286,27 @@ export const dailyUsage = pgTable(
   ],
 );
 
+export const ASSISTANT_MODES = ["allergen", "general", "guardrail", "demo"] as const;
+export type AssistantMode = (typeof ASSISTANT_MODES)[number];
+
+/**
+ * Menu assistant answers by mode, one counter per restaurant day and mode (RESTAURANT_TZ, like order counts). Numbers
+ * only: no question, user or dish is ever stored. Admin stats read it.
+ */
+export const assistantStat = pgTable(
+  "assistant_stat",
+  {
+    day: date("day", { mode: "string" }).notNull(),
+    mode: text("mode", { enum: ASSISTANT_MODES }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.day, t.mode] }),
+    check("assistant_stat_mode_chk", sql`${t.mode} in (${list(ASSISTANT_MODES)})`),
+    check("assistant_stat_count_chk", sql`${t.count} >= 0`),
+  ],
+);
+
 /** Per-user rate-limit ledger: one row per attempt, counted over a sliding window. */
 export const rateEvent = pgTable(
   "rate_event",
