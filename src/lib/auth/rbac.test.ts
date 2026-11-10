@@ -50,3 +50,16 @@ describe("toRole", () => {
     expect(toRole("user, admin")).toBe("admin");
   });
 });
+
+describe("toRole", () => {
+  it("returns exactly one role: admin, then staff, then user", () => {
+    expect(toRole("admin")).toBe("admin");
+    expect(toRole("staff")).toBe("staff");
+    expect(toRole("user")).toBe("user");
+    expect(toRole("staff,admin")).toBe("admin");
+    expect(toRole("user, staff")).toBe("staff");
+    expect(toRole("underwriter")).toBe("user");
+    expect(toRole(null)).toBe("user");
+    expect(toRole("")).toBe("user");
+  });
+});

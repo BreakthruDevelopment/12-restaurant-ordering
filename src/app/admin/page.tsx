@@ -28,7 +28,7 @@ export default async function AdminPage() {
     {
       key: "role",
       header: "Role",
-      cell: (u) => (u.role === "admin" ? <span className="inline-flex rounded-md bg-accent-soft px-2 py-0.5 text-sm font-medium text-accent">Admin</span> : "User"),
+      cell: (u) => (u.role === "admin" ? <span className="inline-flex rounded-md bg-accent-soft px-2 py-0.5 text-sm font-medium text-accent">Admin</span> : u.role === "staff" ? "Staff" : "Customer"),
     },
     {
       key: "joined",

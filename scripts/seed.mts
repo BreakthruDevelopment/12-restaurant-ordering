@@ -1,7 +1,9 @@
 /**
- * Creates a demo admin and a demo user so a fresh deploy has something to show.
+ * Creates an admin, a staff member and a customer so a fresh deploy (or CI's smoke test) has accounts to sign in with.
  * Passwords come from env, never from the repo:
- *   SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD, SEED_USER_EMAIL, SEED_USER_PASSWORD
+ *   SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD, SEED_STAFF_EMAIL, SEED_STAFF_PASSWORD, SEED_USER_EMAIL, SEED_USER_PASSWORD
+ * Roles are set straight in the database by this trusted script; the public API can never grant one.
+ * (The demo restaurant is loaded separately: scripts/seed-demo.mts or the admin button.)
  */
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -13,6 +15,7 @@ if (!DATABASE_URL) throw new Error("DATABASE_URL is not set");
 
 const accounts = [
   { email: process.env.SEED_ADMIN_EMAIL, password: process.env.SEED_ADMIN_PASSWORD, name: "Demo Admin", role: "admin" },
+  { email: process.env.SEED_STAFF_EMAIL, password: process.env.SEED_STAFF_PASSWORD, name: "Smoke Staff", role: "staff" },
   { email: process.env.SEED_USER_EMAIL, password: process.env.SEED_USER_PASSWORD, name: "Demo User", role: "user" },
 ].filter((a): a is { email: string; password: string; name: string; role: string } => Boolean(a.email && a.password));
 
