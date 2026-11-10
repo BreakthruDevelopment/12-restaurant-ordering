@@ -174,7 +174,7 @@ export const restaurantSetting = pgTable(
   (t) => [check("restaurant_setting_singleton_chk", sql`${t.id} = 1`), check("restaurant_setting_pickup_chk", sql`${t.pickupMinutes} between 5 and 90`)],
 );
 
-/** One row per UTC day; the row lock taken by the upsert serializes daily order numbers. */
+/** One row per restaurant day (RESTAURANT_TZ); the row lock taken by the upsert serializes daily order numbers. */
 export const dailyCounter = pgTable("daily_counter", {
   day: date("day", { mode: "string" }).primaryKey(),
   last: integer("last").notNull().default(0),
@@ -184,7 +184,7 @@ export const order = pgTable(
   "order",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    /** "A-042": per UTC day, from daily_counter. */
+    /** "A-042": per restaurant day (RESTAURANT_TZ), from daily_counter. */
     number: text("number").notNull(),
     day: date("day", { mode: "string" })
       .notNull()
@@ -206,6 +206,8 @@ export const order = pgTable(
     /** Computed on the server from the menu prices at order time. Integer cents. */
     subtotalCents: integer("subtotal_cents").notNull(),
     idempotencyKey: uuid("idempotency_key").notNull(),
+    /** SHA-256 of the canonical request (sorted lines, name, note, allergy answer): a reused key with a different body is refused. */
+    requestHash: text("request_hash").notNull(),
     cancelReason: text("cancel_reason"),
     /** Estimated pickup time, fixed at placement from restaurant_setting.pickup_minutes. */
     readyEstimateAt: timestamp("ready_estimate_at", { withTimezone: true }).notNull(),
@@ -230,6 +232,8 @@ export const order = pgTable(
       sql`(${t.allergyAlert} and (cardinality(${t.allergyAllergens}) > 0 or char_length(${t.allergyNote}) > 0)) or (not ${t.allergyAlert} and cardinality(${t.allergyAllergens}) = 0 and ${t.allergyNote} = '')`,
     ),
     check("order_ack_shape_chk", sql`(${t.allergyAckAt} is null or ${t.allergyAlert})`),
+    // Backstop: an alert order is never past 'placed' without an acknowledgment (cancelled is fine).
+    check("order_alert_ack_chk", sql`(not ${t.allergyAlert} or ${t.allergyAckAt} is not null or ${t.status} in ('placed', 'cancelled'))`),
     check("order_confirmed_shape_chk", sql`(not ${t.allergyCustomerConfirmed} or ${t.allergyAlert})`),
     check("order_cancel_reason_chk", sql`${t.cancelReason} is null or char_length(${t.cancelReason}) <= 200`),
   ],

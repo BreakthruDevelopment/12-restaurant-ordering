@@ -21,6 +21,15 @@ track them; the kitchen works a board; allergen information is handled with liab
 - **Allergy question:** required at checkout. A dish that declares a picked allergen needs the customer's
   confirmation; the order carries an allergy alert that is fixed after placement, and **staff must acknowledge
   it before the order can be accepted** (or cancel it).
+- **Database triggers are a backstop, not a boundary.** They refuse edits to the allergy fields, rewrites of the
+  acknowledgment, out-of-order status changes, and any change to the append-only `allergen_change` log. A database
+  superuser can switch them off (`session_replication_role`, `ALTER TABLE ... DISABLE TRIGGER`), and the Oracle
+  deployment shares one `postgres` superuser across apps (known follow-up: per-app roles). The rules that matter are
+  enforced in the data functions; the triggers catch bugs and hand-written SQL, not a hostile superuser.
+- **Restaurant day:** order numbers (`A-042`), `order.day` and the admin counts use the calendar day in
+  `RESTAURANT_TZ` (default `America/Chicago`), so numbering doesn't reset mid-dinner.
+- **Idempotency:** a retry with the same `idempotencyKey` and the same order returns the first order; the same key
+  with a different order (an allergy added on the retry, say) is `409 idempotency_key_reused`.
 - **Demo:** "Demo Noodle Bar" (24 dishes, 3 customers, 2 staff, 1 admin, orders in every state, one with an
   allergy alert): the admin button, or `scripts/seed-demo.mts` locally.
 - **Status:** this is the data and API layer (issue 12.1). The live status stream (12.2), the menu assistant (12.3)

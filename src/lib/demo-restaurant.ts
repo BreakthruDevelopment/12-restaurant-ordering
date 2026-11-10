@@ -9,6 +9,7 @@ import { db, schema } from "@/lib/db";
 import type { Allergen, AllergenLevel, DietaryTag, OrderStatus } from "@/lib/db/schema";
 import { DEMO_EMAIL_DOMAIN, MARKER } from "@/lib/demo-identity";
 import { demoSeedConfig } from "@/lib/demo-seed-config";
+import { restaurantDay } from "@/lib/restaurant-time";
 import { ConflictError, TooManyRequestsError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { allocateOrderNumber } from "@/lib/orders";
@@ -23,7 +24,7 @@ import { releaseDaily, releaseRate, reserveDaily } from "@/lib/usage";
  * random passwords nobody knows, and no admin account is created) and the local CLI (`scripts/seed-demo.mts`, which
  * refuses production hosts first, sets a known DEMO_PASSWORD and also creates the demo admin).
  *
- * Users are written with Drizzle, never through Better Auth (its hooks refuse demo identities), and a Postgres 23505
+ * Declarations and verification stamps are attributed to the administrator who loaded it. Users are written with Drizzle, never through Better Auth (its hooks refuse demo identities), and a Postgres 23505
  * (a real account took a demo email) is a 409, not a 500. Menu rows have fixed ids, so a load only ever touches
  * demo rows: it never deletes or edits a real menu item, and items are never deleted (the allergen log is append-only).
  */
@@ -259,7 +260,11 @@ async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise
   }
   const ids = [...people.values()];
   const id = (p: Person) => people.get(p)!;
-  const verifier = id("avery");
+  // Declarations and verification stamps are attributed to whoever loaded the demo, never to a made-up staff member.
+  // The stamp has a foreign key to a real account; the CLI's trusted actor ("demo-seed-cli") isn't one, so there the
+  // stamp keeps no reviewer and the change log still names the actor.
+  const [realActor] = await db().select({ id: schema.user.id }).from(schema.user).where(eq(schema.user.id, actor.id));
+  const verifier = realActor?.id ?? null;
 
   const { menuCategory, menuItem, menuItemAllergen, allergenChange, order, orderLine, restaurantSetting, rateEvent } = schema;
   const MINUTE = 60_000;
@@ -273,10 +278,8 @@ async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise
     await tx.delete(order).where(inArray(order.customerId, ids));
     await tx.delete(rateEvent).where(and(inArray(rateEvent.userId, ids), sql`${rateEvent.kind} <> 'demo_load'`));
 
-    await tx
-      .insert(restaurantSetting)
-      .values({ id: 1, acceptingOrders: true, pickupMinutes: 20 })
-      .onConflictDoUpdate({ target: restaurantSetting.id, set: { acceptingOrders: true, pickupMinutes: 20, updatedAt: sql`now()` } });
+    // The settings row exists; whether ordering is open is staff's call, so a load never changes it.
+    await tx.insert(restaurantSetting).values({ id: 1 }).onConflictDoNothing();
 
     for (const [position, cat] of DEMO_MENU.entries()) {
       await tx
@@ -311,7 +314,7 @@ async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise
       if (JSON.stringify(current) !== JSON.stringify(after) || !(await hasChange(tx, item.id))) {
         await tx.delete(menuItemAllergen).where(eq(menuItemAllergen.itemId, item.id));
         if (after.length) await tx.insert(menuItemAllergen).values(after.map((a) => ({ itemId: item.id, ...a })));
-        await tx.insert(allergenChange).values({ itemId: item.id, actorId: verifier, before: current, after });
+        await tx.insert(allergenChange).values({ itemId: item.id, actorId: actor.id, before: current, after });
       }
     }
 
@@ -321,10 +324,14 @@ async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise
         return { item, qty, position, unitPriceCents: item.priceCents };
       });
       const created = ago(spec.age);
+      // Number and day both come from when the order was placed, so an order from yesterday counts yesterday.
+      const { number, day } = await allocateOrderNumber(tx, restaurantDay(created));
       const [row] = await tx
         .insert(order)
         .values({
-          number: await allocateOrderNumber(tx),
+          number,
+          day,
+          requestHash: `demo:${randomUUID()}`,
           customerId: id(spec.customer),
           status: spec.status,
           pickupName: spec.pickupName,

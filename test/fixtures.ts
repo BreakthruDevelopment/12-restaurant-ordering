@@ -13,10 +13,12 @@ export async function insertUsers(sql: postgres.Sql, users: TestUser[]) {
 /**
  * Empty the menu and orders. The allergen log is append-only (a trigger refuses DELETE and TRUNCATE), so this switches
  * triggers off for one transaction with session_replication_role, which needs a superuser (the CI database user is one).
+ * That also switches off foreign-key cascades, so every child table is emptied explicitly, children first.
  */
 export async function resetRestaurant(sql: postgres.Sql) {
   await sql.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
+    await tx`delete from order_line`;
     await tx`delete from "order"`;
     await tx`delete from allergen_change`;
     await tx`delete from menu_item_allergen`;
@@ -29,7 +31,7 @@ export async function resetRestaurant(sql: postgres.Sql) {
 
 export type SeedItem = { id: string; name: string; price: number };
 
-/** A small menu inserted with raw SQL: Pad Thai (peanuts, egg), Rice (no declaration), Soup (may contain milk), Cake (sold out). */
+/** A small menu inserted with raw SQL: Pad Thai (peanuts, egg), Rice (no declaration), Soup (may contain milk), Cake (sold out), Tofu (wheat only), Bun (gluten only). */
 export async function seedMenu(sql: postgres.Sql, staffId: string) {
   const [cat] = await sql`insert into menu_category (name, position) values ('Test mains', 1) returning id`;
   const mk = async (name: string, price: number, opts: { soldOut?: boolean; verified?: boolean } = {}): Promise<SeedItem> => {
@@ -43,7 +45,10 @@ export async function seedMenu(sql: postgres.Sql, staffId: string) {
   const rice = await mk("Steamed Rice", 300);
   const soup = await mk("Miso Soup", 800);
   const cake = await mk("Chocolate Cake", 600, { soldOut: true });
+  const tofu = await mk("Crispy Tofu Bites", 700); // declares wheat only
+  const bun = await mk("Plain Bun", 350); // declares gluten only
   await sql`insert into menu_item_allergen (item_id, allergen, level) values
-    (${padThai.id}, 'peanuts', 'contains'), (${padThai.id}, 'egg', 'contains'), (${soup.id}, 'milk', 'may_contain')`;
-  return { categoryId: cat.id as string, padThai, rice, soup, cake };
+    (${padThai.id}, 'peanuts', 'contains'), (${padThai.id}, 'egg', 'contains'), (${soup.id}, 'milk', 'may_contain'),
+    (${tofu.id}, 'wheat', 'may_contain'), (${bun.id}, 'gluten', 'contains')`;
+  return { categoryId: cat.id as string, padThai, rice, soup, cake, tofu, bun };
 }

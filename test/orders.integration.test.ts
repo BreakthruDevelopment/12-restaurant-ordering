@@ -13,6 +13,7 @@ const url = process.env.TEST_DATABASE_URL;
 describe.skipIf(!url)("orders data layer (Postgres)", () => {
   let sql: postgres.Sql;
   let orders: typeof import("@/lib/orders");
+  let database: ReturnType<typeof import("@/lib/db").db>;
   let menu: typeof import("@/lib/menu");
   let m: Awaited<ReturnType<typeof seedMenu>>;
   const staff = { id: "od-staff", role: "staff" as const };
@@ -47,6 +48,7 @@ describe.skipIf(!url)("orders data layer (Postgres)", () => {
     await resetRestaurant(sql);
     m = await seedMenu(sql, staff.id);
     orders = await import("@/lib/orders");
+    database = (await import("@/lib/db")).db();
     menu = await import("@/lib/menu");
   });
   afterEach(async () => {
@@ -160,6 +162,17 @@ describe.skipIf(!url)("orders data layer (Postgres)", () => {
       expect(ints[7] - ints[0]).toBe(7); // gapless
     });
 
+    it("numbers by the restaurant's day (RESTAURANT_TZ, default America/Chicago), not UTC, and restarts at A-001 on a new day", async () => {
+      const o = await one(await customer());
+      const [row] = await sql`select day::text as day, (now() at time zone 'America/Chicago')::date::text as chicago from "order" where id = ${o.id}`;
+      expect(row.day).toBe(row.chicago);
+      const alloc = (day?: string) => database.transaction((tx) => orders.allocateOrderNumber(tx, day));
+      expect(await alloc("2031-01-01")).toEqual({ number: "A-001", day: "2031-01-01" });
+      expect(await alloc("2031-01-01")).toEqual({ number: "A-002", day: "2031-01-01" });
+      expect(await alloc("2031-01-02")).toEqual({ number: "A-001", day: "2031-01-02" });
+      await sql`delete from daily_counter where day in ('2031-01-01', '2031-01-02')`;
+    });
+
     it("limits a customer to 3 open orders (409) and frees a slot when one finishes", async () => {
       const c = await customer();
       const [a] = [await one(c), await one(c), await one(c)];
@@ -182,15 +195,56 @@ describe.skipIf(!url)("orders data layer (Postgres)", () => {
   });
 
   describe("idempotency", () => {
-    it("the same key yields one order, and the replay isn't charged to the caps", async () => {
+    it("the same request with the same key yields one order, and the replay isn't charged to the caps", async () => {
       const c = await customer();
       const key = randomUUID();
-      const a = await place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key });
-      const b = await place(c, [{ itemId: m.padThai.id, qty: 5 }], { idempotencyKey: key, pickupName: "Other" });
+      const a = await place(c, [{ itemId: m.rice.id, qty: 1 }, { itemId: m.soup.id, qty: 2 }], { idempotencyKey: key });
+      // Same order, lines in another order and with a price the schema drops: still the same request.
+      const b = await orders.placeOrder(c, { lines: [{ itemId: m.soup.id, qty: 2, priceCents: 1 }, { itemId: m.rice.id, qty: 1 }], pickupName: "Sam", allergy: noAllergy, idempotencyKey: key });
       expect(a.created).toBe(true);
-      expect(b).toMatchObject({ created: false, order: { id: a.order.id, subtotalCents: 300, pickupName: "Sam" } });
+      expect(b).toMatchObject({ created: false, order: { id: a.order.id } });
       expect(await sql`select 1 from "order" where customer_id = ${c.id}`).toHaveLength(1);
       expect((await sql`select count(*)::int as n from rate_event where user_id = ${c.id} and kind = 'order'`)[0].n).toBe(1);
+    });
+
+    it("the same key with a different request is 409 idempotency_key_reused, never the first order (an allergy added on a retry is not dropped)", async () => {
+      const c = await customer();
+      const key = randomUUID();
+      const first = await place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key });
+      const retries: Record<string, unknown>[] = [
+        { allergy: { has: true, allergens: ["peanuts"], note: "" } },
+        { allergy: { has: true, allergens: [], note: "celery" } },
+        { pickupName: "Other" },
+        { note: "extra" },
+      ];
+      for (const extra of retries) {
+        await expect(place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key, ...extra })).rejects.toMatchObject({ status: 409, details: { code: "idempotency_key_reused" } });
+      }
+      await expect(place(c, [{ itemId: m.rice.id, qty: 2 }], { idempotencyKey: key })).rejects.toMatchObject({ status: 409, details: { code: "idempotency_key_reused" } });
+      await expect(place(c, [{ itemId: m.padThai.id, qty: 1 }], { idempotencyKey: key })).rejects.toMatchObject({ status: 409, details: { code: "idempotency_key_reused" } });
+      // The first order is untouched and no second order exists.
+      expect((await orders.getOrder(c, first.order.id)).allergy.alert).toBe(false);
+      expect(await sql`select 1 from "order" where customer_id = ${c.id}`).toHaveLength(1);
+      // The identical request still replays.
+      expect((await place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key })).created).toBe(false);
+    });
+
+    it("simultaneous requests with one key and different bodies: one order, the rest 409 idempotency_key_reused or replays of the same body", async () => {
+      const c = await customer();
+      const key = randomUUID();
+      const results = await Promise.allSettled([
+        place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key }),
+        place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key, allergy: { has: true, allergens: ["milk"] } }),
+        place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key }),
+        place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key, allergy: { has: true, allergens: ["milk"] } }),
+      ]);
+      expect(await sql`select 1 from "order" where customer_id = ${c.id}`).toHaveLength(1);
+      const [row] = await sql`select allergy_alert from "order" where customer_id = ${c.id}`;
+      for (const r of results) {
+        if (r.status === "rejected") expect(r.reason).toMatchObject({ status: 409, details: { code: "idempotency_key_reused" } });
+        // Whoever got an order back got the one request that won, never the other body's order.
+        else expect(r.value.order.allergy.alert).toBe(row.allergy_alert);
+      }
     });
 
     it("ten simultaneous requests with one key create exactly one order", async () => {
@@ -216,7 +270,7 @@ describe.skipIf(!url)("orders data layer (Postgres)", () => {
       const key = randomUUID();
       await place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: key });
       await expect(
-        sql`insert into "order" (number, customer_id, pickup_name, subtotal_cents, idempotency_key, ready_estimate_at) values ('Z-1', ${c.id}, 'x', 0, ${key}, now())`,
+        sql`insert into "order" (number, customer_id, pickup_name, subtotal_cents, idempotency_key, request_hash, ready_estimate_at) values ('Z-1', ${c.id}, 'x', 0, ${key}, 'x', now())`,
       ).rejects.toMatchObject({ code: "23505" });
     });
   });
@@ -407,6 +461,27 @@ describe.skipIf(!url)("orders data layer (Postgres)", () => {
       expect(order.allergy).toMatchObject({ alert: true, customerConfirmed: true });
     });
 
+    it("over-warns across related allergens: gluten matches a wheat-only dish and wheat matches a gluten-only dish", async () => {
+      const c = await customer();
+      const body = (allergens: string[], confirmWithStaff = false) => ({ allergy: { has: true, allergens, confirmWithStaff } });
+      const err = await place(c, [{ itemId: m.tofu.id, qty: 1 }], body(["gluten"])).catch((e) => e);
+      expect(err).toMatchObject({ status: 409, details: { code: "allergy_confirmation_required", items: [{ name: "Crispy Tofu Bites" }] } });
+      await expect(place(c, [{ itemId: m.bun.id, qty: 1 }], body(["wheat"]))).rejects.toMatchObject({ status: 409, details: { code: "allergy_confirmation_required" } });
+      // With the confirmation it goes through, and the order stores what the customer picked, not the expansion.
+      const { order } = await place(c, [{ itemId: m.tofu.id, qty: 1 }], body(["gluten"], true));
+      expect(order.allergy).toMatchObject({ alert: true, allergens: ["gluten"], customerConfirmed: true });
+      // Unrelated allergens still don't match.
+      await expect(place(await customer(), [{ itemId: m.tofu.id, qty: 1 }], body(["tree_nuts"]))).resolves.toBeTruthy();
+    });
+
+    it("customerConfirmed is recorded only when there was something to confirm", async () => {
+      const c = await customer();
+      const { order } = await place(c, [{ itemId: m.rice.id, qty: 1 }], { allergy: { has: true, allergens: ["peanuts"], confirmWithStaff: true } });
+      expect(order.allergy).toMatchObject({ alert: true, customerConfirmed: false });
+      const none = await place(await customer(), [{ itemId: m.rice.id, qty: 1 }], { allergy: { has: false, confirmWithStaff: true } });
+      expect(none.order.allergy).toMatchObject({ alert: false, customerConfirmed: false });
+    });
+
     it("a may-contain declaration counts as a conflict too", async () => {
       const c = await customer();
       await expect(place(c, [{ itemId: m.soup.id, qty: 1 }], { allergy: { has: true, allergens: ["milk"] } })).rejects.toMatchObject({ status: 409 });
@@ -539,6 +614,50 @@ describe.skipIf(!url)("orders data layer (Postgres)", () => {
         await expect(sql`update "order" set status = 'placed' where id = ${o.id}`).rejects.toMatchObject({ code: "55000" });
       });
 
+      it("a CHECK refuses an alert order past 'placed' without an acknowledgment, even on insert", async () => {
+        const c = await customer();
+        const insert = (status: string, ack: boolean) =>
+          sql`insert into "order" (number, customer_id, status, pickup_name, allergy_alert, allergy_allergens, subtotal_cents, idempotency_key, request_hash, ready_estimate_at, allergy_ack_at, allergy_ack_by)
+              values ('Z-' || substr(gen_random_uuid()::text, 1, 8), ${c.id}, ${status}, 'x', true, '{peanuts}', 0, gen_random_uuid(), 'x', now(), ${ack ? sql`now()` : null}, ${ack ? staff.id : null})`;
+        for (const status of ["accepted", "preparing", "ready", "picked_up"]) await expect(insert(status, false)).rejects.toMatchObject({ code: "23514" });
+        await expect(insert("accepted", true)).resolves.toBeTruthy();
+        await expect(insert("placed", false)).resolves.toBeTruthy();
+        await expect(insert("cancelled", false)).resolves.toBeTruthy();
+      });
+
+      it("a first acknowledgment must name a reviewer and happen while the order is placed", async () => {
+        const c = await customer();
+        const o = await alertOrder(c);
+        await expect(sql`update "order" set allergy_ack_at = now() where id = ${o.id}`).rejects.toMatchObject({ code: "55000" }); // no reviewer
+        await expect(sql`update "order" set allergy_ack_at = now(), allergy_ack_by = null where id = ${o.id}`).rejects.toMatchObject({ code: "55000" });
+        const cancelled = await alertOrder(await customer());
+        await move(staff, cancelled.id, "cancelled", cancelled.version, "Can't safely prepare");
+        await expect(sql`update "order" set allergy_ack_at = now(), allergy_ack_by = ${staff.id} where id = ${cancelled.id}`).rejects.toMatchObject({ code: "55000" });
+        // The proper way works.
+        await expect(sql`update "order" set allergy_ack_at = now(), allergy_ack_by = ${staff.id} where id = ${o.id}`).resolves.toBeTruthy();
+      });
+
+      it("the trigger enforces the forward chain and cancel-from-open, whoever writes the SQL", async () => {
+        const c = await customer();
+        const o = await one(c);
+        for (const to of ["preparing", "ready", "picked_up"]) {
+          await expect(sql`update "order" set status = ${to} where id = ${o.id}`).rejects.toMatchObject({ code: "55000" });
+        }
+        await sql`update "order" set status = 'accepted' where id = ${o.id}`;
+        await expect(sql`update "order" set status = 'ready' where id = ${o.id}`).rejects.toMatchObject({ code: "55000" });
+        await expect(sql`update "order" set status = 'placed' where id = ${o.id}`).rejects.toMatchObject({ code: "55000" });
+        await sql`update "order" set status = 'preparing' where id = ${o.id}`;
+        await sql`update "order" set status = 'ready' where id = ${o.id}`;
+        await expect(sql`update "order" set status = 'accepted' where id = ${o.id}`).rejects.toMatchObject({ code: "55000" });
+        await sql`update "order" set status = 'cancelled', cancel_reason = 'x' where id = ${o.id}`;
+        await expect(sql`update "order" set status = 'picked_up' where id = ${o.id}`).rejects.toMatchObject({ code: "55000" });
+      });
+
+      it("the request hash is fixed after placement", async () => {
+        const o = await one(await customer());
+        await expect(sql`update "order" set request_hash = 'other' where id = ${o.id}`).rejects.toMatchObject({ code: "55000" });
+      });
+
       it("deleting a staff account keeps the acknowledgment time and blanks only who", async () => {
         await insertUsers(sql, [{ id: "od-temp-staff", role: "staff" }]);
         const c = await customer();
@@ -565,6 +684,21 @@ describe.skipIf(!url)("orders data layer (Postgres)", () => {
           sql`insert into order_line (order_id, customer_id, menu_item_id, name, unit_price_cents, qty, allergens) values (${o.id}, ${b.id}, ${m.rice.id}, 'x', 1, 1, '[]')`,
         ).rejects.toMatchObject({ code: "23503" });
       });
+    });
+
+    it("order.placed is logged only for orders that committed", async () => {
+      const { log } = await import("@/lib/log");
+      const spy = vi.spyOn(log, "info").mockImplementation(() => {});
+      try {
+        const c = await customer();
+        await expect(place(c, [{ itemId: m.cake.id, qty: 1 }])).rejects.toMatchObject({ status: 409 });
+        expect(spy.mock.calls.filter(([msg]) => msg === "order.placed")).toHaveLength(0);
+        const first = await one(c);
+        await place(c, [{ itemId: m.rice.id, qty: 1 }], { idempotencyKey: (await sql`select idempotency_key from "order" where id = ${first.id}`)[0].idempotency_key }); // replay
+        expect(spy.mock.calls.filter(([msg]) => msg === "order.placed")).toHaveLength(1);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it("logs carry ids and statuses only: never allergens, notes, names or prices", async () => {

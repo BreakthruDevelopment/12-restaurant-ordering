@@ -14,8 +14,27 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://localhost:3000}"
 RUN_ID="$(date +%s)$RANDOM"
 JAR_A="$(mktemp)"; JAR_B="$(mktemp)"; JAR_C="$(mktemp)"; JAR_S="$(mktemp)"; OUT="$(mktemp)"
-CLEANUP_ITEMS=()
-trap 'rm -f "$JAR_A" "$JAR_B" "$JAR_C" "$JAR_S" "$OUT"' EXIT
+CLEANUP_ITEMS=(); CLEANUP_ORDERS=(); HAVE_STAFF=no
+# Runs on success and on failure: cancel any smoke order still open and archive the smoke dish, best effort, so a failed
+# run doesn't leave an open order or a dish on a live menu. Keeps the script's own exit code.
+cleanup() {
+  local rc=$? id o st ver
+  set +e
+  open_cancel() { # open_cancel JAR REASON_JSON_FRAGMENT ORDER_ID
+    o=$(curl -s -b "$1" "$BASE_URL/api/orders/$3")
+    st=$(printf '%s' "$o" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>{try{const j=JSON.parse(d).order;console.log(["placed","accepted","preparing","ready"].includes(j.status)?j.version:"")}catch{console.log("")}})')
+    [ -n "$st" ] && curl -s -o /dev/null -X POST -b "$1" -H "origin: $BASE_URL" -H 'content-type: application/json' -d "{\"to\":\"cancelled\",\"version\":$st$2}" "$BASE_URL/api/orders/$3/transition"
+  }
+  for id in ${CLEANUP_ORDERS[@]+"${CLEANUP_ORDERS[@]}"}; do
+    if [ "$HAVE_STAFF" = yes ]; then open_cancel "$JAR_S" ',"reason":"smoke test cleanup"' "$id"; else open_cancel "$JAR_A" '' "$id"; fi
+  done
+  if [ "$HAVE_STAFF" = yes ]; then
+    for id in ${CLEANUP_ITEMS[@]+"${CLEANUP_ITEMS[@]}"}; do curl -s -o /dev/null -X DELETE -b "$JAR_S" -H "origin: $BASE_URL" "$BASE_URL/api/menu/items/$id"; done
+  fi
+  rm -f "$JAR_A" "$JAR_B" "$JAR_C" "$JAR_S" "$OUT"
+  exit $rc
+}
+trap cleanup EXIT
 
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
@@ -108,7 +127,6 @@ fi
 pass "customers refused on staff endpoints; sign-up with a role stays a customer"
 
 # --- Staff setup (optional) -----------------------------------------------------------------------------------------
-HAVE_STAFF=no
 if [ -n "${SMOKE_STAFF_EMAIL:-}" ] && [ -n "${SMOKE_STAFF_PASSWORD:-}" ]; then
   curl -fsS -c "$JAR_S" -b "$JAR_S" -H 'content-type: application/json' -H "origin: $BASE_URL" \
     -d "{\"email\":\"$SMOKE_STAFF_EMAIL\",\"password\":\"$SMOKE_STAFF_PASSWORD\"}" "$BASE_URL/api/auth/sign-in/email" >/dev/null || fail "staff sign-in failed"
@@ -147,7 +165,7 @@ fi
 ORDER='{"lines":[{"itemId":"'"$ITEM"'","qty":2,"unitPriceCents":1,"priceCents":1}],"pickupName":"Smoke","allergy":{"has":false},"subtotalCents":1,"idempotencyKey":"'"$KEY"'"}'
 req POST /api/orders "$JAR_A" "$ORDER"
 expect 201 "first order"
-OID=$(json 'j.order.id'); OVER=$(json 'j.order.version')
+OID=$(json 'j.order.id'); OVER=$(json 'j.order.version'); CLEANUP_ORDERS+=("$OID")
 [ "$(json 'j.order.subtotalCents')" = "$((UNIT * 2))" ] || fail "client-sent prices must be ignored: expected $((UNIT * 2)) cents, got $BODY"
 pass "A placed an order; the total came from the menu, not from the client"
 
@@ -158,6 +176,12 @@ req GET /api/orders "$JAR_A"
 expect 200 "A's order list"
 [ "$(json 'j.orders.filter((o) => o.id === "'"$OID"'").length')" = "1" ] || fail "the same key created more than one order"
 pass "the same idempotency key yields one order"
+
+# The same key with a different order (say, an allergy added on a retry) is refused, never answered with the first order.
+req POST /api/orders "$JAR_A" '{"lines":[{"itemId":"'"$ITEM"'","qty":2}],"pickupName":"Smoke","allergy":{"has":true,"allergens":["sesame"],"note":""},"idempotencyKey":"'"$KEY"'"}'
+expect 409 "a reused idempotency key with a different body"
+[ "$(json 'j.details.code')" = "idempotency_key_reused" ] || fail "409 should carry idempotency_key_reused: $BODY"
+pass "a reused idempotency key with a different body is 409 (idempotency_key_reused)"
 
 req GET "/api/orders/$OID" "$JAR_B"
 expect 404 "B reading A's order"
@@ -181,7 +205,7 @@ if [ "$HAVE_STAFF" = yes ]; then
   [ "$(json 'j.details.code')" = "allergy_confirmation_required" ] || fail "409 should carry allergy_confirmation_required: $BODY"
   req POST /api/orders "$JAR_B" "$(ALLERGY_ORDER true)"
   expect 201 "allergy order with confirmation"
-  AID=$(json 'j.order.id'); AVER=$(json 'j.order.version')
+  AID=$(json 'j.order.id'); AVER=$(json 'j.order.version'); CLEANUP_ORDERS+=("$AID")
   [ "$(json 'j.order.allergy.alert')" = "true" ] || fail "allergy alert missing: $BODY"
   pass "the allergy question: matching dish refused until B confirms, then the alert is stored"
 
@@ -200,10 +224,6 @@ if [ "$HAVE_STAFF" = yes ]; then
   expect 200 "staff cancelling the smoke allergy order"
   req POST "/api/orders/$OID/transition" "$JAR_S" '{"to":"cancelled","version":'"$OVER"',"reason":"smoke test cleanup"}'
   expect 200 "staff cancelling the smoke order"
-  for id in "${CLEANUP_ITEMS[@]}"; do
-    req DELETE "/api/menu/items/$id" "$JAR_S"
-    expect 204 "archiving the smoke dish"
-  done
 else
   req POST "/api/orders/$OID/transition" "$JAR_A" '{"to":"cancelled","version":'"$OVER"'}'
   expect 200 "customer cancelling while placed"

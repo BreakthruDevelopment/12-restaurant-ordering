@@ -3,12 +3,13 @@ import { count, isNull, and, eq, sql } from "drizzle-orm";
 import { assertAdmin } from "@/lib/access";
 import type { Actor } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
+import { restaurantDayExpr } from "@/lib/restaurant-time";
 import { ORDER_STATUSES, type OrderStatus } from "@/lib/db/schema";
 
 export const STATS_DAYS = 14;
 
 export type AdminStats = {
-  /** One entry per UTC day with orders in the last 14 days, newest first. */
+  /** One entry per restaurant day (RESTAURANT_TZ) with orders in the last 14 days, newest first. */
   ordersByDay: ({ day: string; total: number } & Record<OrderStatus, number>)[];
   soldOutItems: number;
   users: { customers: number; staff: number; admins: number };
@@ -24,7 +25,7 @@ export async function adminStats(actor: Actor): Promise<AdminStats> {
   const byDay = await db()
     .select({ day: sql<string>`${order.day}::text`, status: order.status, n: count() })
     .from(order)
-    .where(sql`${order.day} > (now() at time zone 'utc')::date - ${STATS_DAYS}::int`)
+    .where(sql`${order.day} > ${restaurantDayExpr()} - ${STATS_DAYS}::int`)
     .groupBy(order.day, order.status);
   const days = new Map<string, AdminStats["ordersByDay"][number]>();
   for (const r of byDay) {

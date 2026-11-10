@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Allergen, AllergenLevel, OrderStatus } from "@/lib/db/schema";
 
 /**
@@ -37,10 +38,52 @@ export function checkTransition(mover: Mover, from: OrderStatus, to: OrderStatus
 
 export type Declared = { allergen: Allergen; level: AllergenLevel };
 
-/** Items whose declaration contains or may contain an allergen the customer picked. */
+/**
+ * Allergens that are sources of one another in the ten-value list. Matching over-warns on purpose: a customer who
+ * picks one of a pair is warned about dishes declaring either, in both directions. Reviewed pair by pair:
+ * - wheat and gluten: wheat is a source of gluten, and a gluten declaration may stand for wheat. Linked.
+ * - peanuts and tree_nuts: separate allergens (peanuts are legumes). Not linked.
+ * - fish, crustacean_shellfish, milk, egg, soy, sesame: no other value in the list is a source of them. Not linked.
+ * This is the only place the relations live; add a pair here and the tests below cover it.
+ */
+export const RELATED_ALLERGENS: readonly (readonly [Allergen, Allergen])[] = [["wheat", "gluten"]];
+
+/** The picked allergens plus everything related to them (see RELATED_ALLERGENS). */
+export function expandAllergens(picked: readonly Allergen[]): Set<Allergen> {
+  const out = new Set<Allergen>(picked);
+  for (const [a, b] of RELATED_ALLERGENS) {
+    if (out.has(a)) out.add(b);
+    if (out.has(b)) out.add(a);
+  }
+  return out;
+}
+
+/** Items whose declaration contains or may contain a picked allergen, or one related to it. */
 export function allergenConflicts<T extends { declared: readonly Declared[] }>(lines: readonly T[], picked: readonly Allergen[]): T[] {
-  const set = new Set<string>(picked);
+  const set = expandAllergens(picked);
   return lines.filter((l) => l.declared.some((d) => set.has(d.allergen)));
+}
+
+export type PlaceOrderRequest = {
+  lines: readonly { itemId: string; qty: number }[];
+  pickupName: string;
+  note: string;
+  allergy: { has: boolean; allergens: readonly string[]; note: string; confirmWithStaff: boolean };
+};
+
+/**
+ * SHA-256 of the order the customer asked for, independent of line order and of keys the schema drops. Stored on the
+ * order so a retry that reuses an idempotency key with a different body (for example, adding an allergy) is refused
+ * instead of silently returning the first order.
+ */
+export function requestHash(r: PlaceOrderRequest): string {
+  const canonical = JSON.stringify({
+    lines: [...r.lines].map((l) => [l.itemId, l.qty]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    pickupName: r.pickupName,
+    note: r.note,
+    allergy: { has: r.allergy.has, allergens: [...r.allergy.allergens].sort(), note: r.allergy.note, confirmWithStaff: r.allergy.has && r.allergy.confirmWithStaff },
+  });
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 /** Money is integer cents everywhere. */

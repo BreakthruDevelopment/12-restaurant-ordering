@@ -8,7 +8,8 @@ import { ALLERGENS, ORDER_STATUSES, type Allergen, type OrderStatus } from "@/li
 import { BadRequestError, ConflictError, NotFoundError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { getSettings } from "@/lib/menu";
-import { OPEN_STATUSES, type Declared, allergenConflicts, checkTransition, formatOrderNumber, subtotalCents } from "@/lib/order-rules";
+import { OPEN_STATUSES, type Declared, allergenConflicts, checkTransition, formatOrderNumber, requestHash, subtotalCents } from "@/lib/order-rules";
+import { restaurantDayExpr } from "@/lib/restaurant-time";
 import { type Tx, advisoryLock, consumeRate } from "@/lib/usage";
 
 /**
@@ -163,34 +164,48 @@ const parseId = (value: string) => {
 const isUniqueViolation = (e: unknown): boolean =>
   typeof e === "object" && e !== null && ((e as { code?: unknown }).code === "23505" || isUniqueViolation((e as { cause?: unknown }).cause));
 
-/** Next daily number. The upsert takes the day's row lock, so concurrent orders get distinct, gapless numbers. */
-export async function allocateOrderNumber(tx: Tx): Promise<string> {
-  const rows = await tx.execute<{ last: number }>(sql`
-    insert into daily_counter (day, last) values ((now() at time zone 'utc')::date, 1)
+/**
+ * Next daily number for `day` (default: today in RESTAURANT_TZ). The upsert takes that day's row lock, so concurrent
+ * orders get distinct, gapless numbers. Returns the day too, so the order row can store the same one.
+ */
+export async function allocateOrderNumber(tx: Tx, day?: string): Promise<{ number: string; day: string }> {
+  const dayExpr = day ? sql`${day}::date` : restaurantDayExpr();
+  const rows = await tx.execute<{ last: number; day: string }>(sql`
+    insert into daily_counter (day, last) values (${dayExpr}, 1)
     on conflict (day) do update set last = daily_counter.last + 1
-    returning last
+    returning last, day::text as day
   `);
-  return formatOrderNumber(Number(rows[0].last));
+  return { number: formatOrderNumber(Number(rows[0].last)), day: rows[0].day };
 }
 
 /**
  * Place an order. Returns `created: false` with the first order when the same `idempotencyKey` was already used by
- * this customer (a double tap or a retry), without spending rate limit or caps.
+ * this customer with the same request (a double tap or a retry), without spending rate limit or caps. The same key
+ * with a different request is 409 `idempotency_key_reused`: the first order is never returned for a request that
+ * differs from it (an added allergy must never be dropped).
  */
 export async function placeOrder(actor: Actor, input: unknown): Promise<{ order: OrderView; created: boolean }> {
   const access = orderAccess(actor); // admins: 404
   assertCustomer(actor); // staff: 403
   const data = placeOrderInput.parse(input);
   const { order, orderLine, menuItem } = schema;
+  const hash = requestHash(data);
+  /** The first order for this key, or a refusal when the retry isn't the same request. */
+  const replay = async (existing: OrderRow, executor: Pick<Tx, "select">) => {
+    if (existing.requestHash !== hash) {
+      throw new ConflictError("This idempotency key was already used for a different order (idempotency_key_reused). Start a new order.", { code: "idempotency_key_reused" });
+    }
+    return { order: (await loadViews([existing], access, executor))[0], created: false };
+  };
   const find = (executor: Pick<Tx, "select">) =>
     executor.select().from(order).where(and(eq(order.customerId, actor.id), eq(order.idempotencyKey, data.idempotencyKey)));
 
   try {
-    return await db().transaction(async (tx) => {
+    const result = await db().transaction(async (tx) => {
       // One order attempt per customer at a time: retries and double taps queue here, so the second sees the first.
       await advisoryLock(tx, `order:${actor.id}`);
       const [existing] = await find(tx);
-      if (existing) return { order: (await loadViews([existing], access, tx))[0], created: false };
+      if (existing) return replay(existing, tx);
 
       await consumeRate(tx, actor.id, "order", ORDERS_PER_HOUR, ORDER_LIMIT_MESSAGE);
       const [{ open }] = await tx
@@ -235,18 +250,20 @@ export async function placeOrder(actor: Actor, input: unknown): Promise<{ order:
         );
       }
 
-      const number = await allocateOrderNumber(tx);
+      const { number, day } = await allocateOrderNumber(tx);
       const [row] = await tx
         .insert(order)
         .values({
           number,
+          day,
           customerId: actor.id,
+          requestHash: hash,
           pickupName: data.pickupName,
           note: data.note,
           allergyAlert: allergy.has,
           allergyAllergens: allergy.has ? allergy.allergens : [],
           allergyNote: allergy.has ? allergy.note : "",
-          allergyCustomerConfirmed: allergy.has && allergy.confirmWithStaff,
+          allergyCustomerConfirmed: conflicts.length > 0 && allergy.confirmWithStaff,
           subtotalCents: subtotalCents(lines),
           idempotencyKey: data.idempotencyKey,
           readyEstimateAt: new Date(Date.now() + settings.pickupMinutes * 60_000),
@@ -264,15 +281,16 @@ export async function placeOrder(actor: Actor, input: unknown): Promise<{ order:
           position: l.position,
         })),
       );
-      // Ids and counts only: never names, notes or allergy details.
-      log.info("order.placed", { orderId: row.id, lineCount: lines.length });
       return { order: (await loadViews([row], access, tx))[0], created: true };
     });
+    // After the commit, so a rolled-back order is never reported. Ids and counts only: never names, notes or allergy details.
+    if (result.created) log.info("order.placed", { orderId: result.order.id, lineCount: result.order.lines.length });
+    return result;
   } catch (err) {
     // Defensive: the per-customer lock above already serializes retries, but the unique index is the real guarantee.
     if (isUniqueViolation(err)) {
       const [existing] = await find(db());
-      if (existing) return { order: (await loadViews([existing], access))[0], created: false };
+      if (existing) return replay(existing, db());
     }
     throw err;
   }

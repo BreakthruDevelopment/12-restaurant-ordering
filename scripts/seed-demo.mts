@@ -1,4 +1,6 @@
 import { demoSeedConfig } from "../src/lib/demo-seed-config";
+import { log } from "../src/lib/log";
+import { safeErrorFields } from "../src/lib/safe-error";
 
 // Local only: DEMO_SEED=yes APP_URL=http://localhost:3000 DEMO_PASSWORD=<10+ chars> pnpm tsx --conditions=react-server scripts/seed-demo.mts
 // Creates demo.breakthru.test accounts (3 customers, 2 staff, 1 admin) with that password, the Demo Noodle Bar menu
@@ -11,7 +13,8 @@ try {
   const result = await loadDemoRestaurant({ id: "demo-seed-cli", role: "admin" }, { mode: "cli" });
   console.log(`Loaded ${result.users} demo users, ${result.categories} categories, ${result.items} items and ${result.orders} orders.`);
 } catch (err) {
-  console.error(err instanceof Error ? err.message : "Demo seed failed.");
+  // Never the raw message: a database error's message carries the SQL parameters (password hashes among them).
+  log.error("demo.seed_failed", safeErrorFields(err));
   process.exitCode = 1;
 } finally {
   const connection = globalThis as unknown as { sql?: { end(): Promise<void> } };

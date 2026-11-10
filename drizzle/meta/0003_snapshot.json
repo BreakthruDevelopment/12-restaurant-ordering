@@ -1,5 +1,5 @@
 {
-  "id": "b42a9d77-3c20-4cd8-b919-58ca26dbe7c9",
+  "id": "4f29367d-6d46-4fa7-947e-e9a67d26d04e",
   "prevId": "d618bdee-ac6f-45e3-9e09-5d78b842010a",
   "version": "7",
   "dialect": "postgresql",
@@ -901,6 +901,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "request_hash": {
+          "name": "request_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "cancel_reason": {
           "name": "cancel_reason",
           "type": "text",
@@ -1089,6 +1095,10 @@
         "order_ack_shape_chk": {
           "name": "order_ack_shape_chk",
           "value": "(\"order\".\"allergy_ack_at\" is null or \"order\".\"allergy_alert\")"
+        },
+        "order_alert_ack_chk": {
+          "name": "order_alert_ack_chk",
+          "value": "(not \"order\".\"allergy_alert\" or \"order\".\"allergy_ack_at\" is not null or \"order\".\"status\" in ('placed', 'cancelled'))"
         },
         "order_confirmed_shape_chk": {
           "name": "order_confirmed_shape_chk",

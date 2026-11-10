@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ORDER_STATUSES, type OrderStatus } from "@/lib/db/schema";
-import { allergenConflicts, checkTransition, formatOrderNumber, subtotalCents, verificationStatus } from "./order-rules";
+import { ALLERGENS } from "@/lib/db/schema";
+import { RELATED_ALLERGENS, allergenConflicts, checkTransition, expandAllergens, formatOrderNumber, requestHash, subtotalCents, verificationStatus } from "./order-rules";
 
 describe("checkTransition: staff", () => {
   it("walks the chain one step at a time", () => {
@@ -83,5 +84,61 @@ describe("verificationStatus", () => {
     expect(verificationStatus(new Date("2026-11-01T00:00:00Z"), now)).toBe("current");
     expect(verificationStatus(new Date("2026-08-12T12:00:00Z"), now)).toBe("current"); // exactly 90 days
     expect(verificationStatus(new Date("2026-08-12T11:59:00Z"), now)).toBe("stale");
+  });
+});
+
+describe("expandAllergens and related allergens", () => {
+  it("links gluten and wheat in both directions", () => {
+    expect([...expandAllergens(["gluten"])].sort()).toEqual(["gluten", "wheat"]);
+    expect([...expandAllergens(["wheat"])].sort()).toEqual(["gluten", "wheat"]);
+    expect([...expandAllergens(["wheat", "gluten"])].sort()).toEqual(["gluten", "wheat"]);
+  });
+
+  it("leaves every other allergen alone", () => {
+    for (const a of ALLERGENS.filter((x) => x !== "wheat" && x !== "gluten")) expect([...expandAllergens([a])]).toEqual([a]);
+    expect([...expandAllergens([])]).toEqual([]);
+  });
+
+  it("only relates allergens that exist in the list, and each pair is symmetric by construction", () => {
+    for (const [a, b] of RELATED_ALLERGENS) {
+      expect(ALLERGENS).toContain(a);
+      expect(ALLERGENS).toContain(b);
+      expect(expandAllergens([a]).has(b)).toBe(true);
+      expect(expandAllergens([b]).has(a)).toBe(true);
+    }
+  });
+
+  it("makes a gluten pick match a wheat-only dish (the demo's Crispy Tofu Bites) and wheat match gluten-only", () => {
+    const tofu = { name: "Crispy Tofu Bites", declared: [{ allergen: "wheat", level: "may_contain" }] } as const;
+    const bun = { name: "Bun", declared: [{ allergen: "gluten", level: "contains" }] } as const;
+    expect(allergenConflicts([tofu], ["gluten"]).map((l) => l.name)).toEqual(["Crispy Tofu Bites"]);
+    expect(allergenConflicts([bun], ["wheat"]).map((l) => l.name)).toEqual(["Bun"]);
+    expect(allergenConflicts([tofu, bun], ["peanuts", "tree_nuts"])).toEqual([]);
+  });
+});
+
+describe("requestHash", () => {
+  const base = { lines: [{ itemId: "a", qty: 1 }, { itemId: "b", qty: 2 }], pickupName: "Sam", note: "", allergy: { has: false, allergens: [], note: "", confirmWithStaff: false } };
+
+  it("is stable across line order and allergen order", () => {
+    expect(requestHash({ ...base, lines: [...base.lines].reverse() })).toBe(requestHash(base));
+    const a = { ...base, allergy: { has: true, allergens: ["milk", "egg"], note: "n", confirmWithStaff: true } };
+    expect(requestHash({ ...a, allergy: { ...a.allergy, allergens: ["egg", "milk"] } })).toBe(requestHash(a));
+  });
+
+  it("changes with anything the customer asked for, the allergy answer first of all", () => {
+    const h = requestHash(base);
+    for (const other of [
+      { ...base, allergy: { ...base.allergy, has: true, allergens: ["peanuts"] } },
+      { ...base, allergy: { ...base.allergy, has: true, note: "celery" } },
+      { ...base, pickupName: "Other" },
+      { ...base, note: "x" },
+      { ...base, lines: [{ itemId: "a", qty: 2 }, { itemId: "b", qty: 2 }] },
+      { ...base, lines: [{ itemId: "a", qty: 1 }] },
+    ]) expect(requestHash(other)).not.toBe(h);
+  });
+
+  it("ignores a confirmation that means nothing without an allergy", () => {
+    expect(requestHash({ ...base, allergy: { ...base.allergy, confirmWithStaff: true } })).toBe(requestHash(base));
   });
 });

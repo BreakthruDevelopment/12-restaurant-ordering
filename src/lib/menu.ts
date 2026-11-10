@@ -23,6 +23,12 @@ export const MENU_WRITES_PER_HOUR = 120;
 const WRITE_LIMIT_MESSAGE = "Too many menu changes this hour. Try again later.";
 
 const id = z.uuid();
+/** A malformed id in a path is the same answer as a missing one (404), never a 400. */
+const parseId = (value: string): string => {
+  const parsed = id.safeParse(value);
+  if (!parsed.success) throw new NotFoundError();
+  return parsed.data;
+};
 const version = z.number().int().min(1).max(1_000_000);
 
 export const categoryInput = z.object({ name: z.string().trim().min(1).max(60), position: z.number().int().min(0).max(1000).default(0) }).strict();
@@ -209,7 +215,7 @@ export async function createCategory(actor: Actor, input: unknown) {
 
 export async function updateCategory(actor: Actor, categoryId: string, input: unknown) {
   assertStaff(actor);
-  const parsedId = id.parse(categoryId);
+  const parsedId = parseId(categoryId);
   const data = categoryPatch.refine((v) => Object.keys(v).length > 0, "Nothing to change").parse(input);
   return menuWrite(actor, async (tx) => {
     const [row] = await tx.update(schema.menuCategory).set(data).where(eq(schema.menuCategory.id, parsedId)).returning();
@@ -221,7 +227,7 @@ export async function updateCategory(actor: Actor, categoryId: string, input: un
 /** Only an empty category (no items at all, archived ones included, since they stay referenced) can go. */
 export async function deleteCategory(actor: Actor, categoryId: string) {
   assertStaff(actor);
-  const parsedId = id.parse(categoryId);
+  const parsedId = parseId(categoryId);
   return menuWrite(actor, async (tx) => {
     const [{ n }] = await tx.select({ n: count() }).from(schema.menuItem).where(eq(schema.menuItem.categoryId, parsedId));
     if (n > 0) throw new ConflictError("Move or archive this category's items first (archived items still belong to it).");
@@ -245,16 +251,9 @@ export async function createItem(actor: Actor, input: unknown) {
   });
 }
 
-/** Distinguish "no such item" (404) from "stale version" (409) after an optimistic update matched nothing. */
-async function whyNoMatch(tx: Tx, itemId: string): Promise<never> {
-  const [row] = await tx.select({ id: schema.menuItem.id }).from(schema.menuItem).where(eq(schema.menuItem.id, itemId));
-  if (!row) throw new NotFoundError();
-  throw new ConflictError("This item was changed by someone else. Reload and try again.");
-}
-
 export async function updateItem(actor: Actor, itemId: string, input: unknown) {
   assertStaff(actor);
-  const parsedId = id.parse(itemId);
+  const parsedId = parseId(itemId);
   const { version: expected, ...fields } = itemPatch.parse(input);
   return menuWrite(actor, async (tx) => {
     const { menuItem } = schema;
@@ -262,21 +261,30 @@ export async function updateItem(actor: Actor, itemId: string, input: unknown) {
       const [cat] = await tx.select({ id: schema.menuCategory.id }).from(schema.menuCategory).where(eq(schema.menuCategory.id, fields.categoryId));
       if (!cat) throw new ConflictError("That category doesn't exist.");
     }
+    const [current] = await tx.select().from(menuItem).where(eq(menuItem.id, parsedId)).for("update");
+    if (!current) throw new NotFoundError();
+    if (current.archivedAt || current.version !== expected) throw new ConflictError("This item was changed by someone else. Reload and try again.");
+    // A new name or description may describe a different recipe: the allergen check no longer stands until staff redo it.
+    const recipeChanged = (fields.name !== undefined && fields.name !== current.name) || (fields.description !== undefined && fields.description !== current.description);
     const [row] = await tx
       .update(menuItem)
-      .set({ ...fields, version: sql`${menuItem.version} + 1`, updatedAt: sql`now()` })
-      .where(and(eq(menuItem.id, parsedId), eq(menuItem.version, expected), isNull(menuItem.archivedAt)))
+      .set({
+        ...fields,
+        ...(recipeChanged ? { allergensVerifiedAt: null, allergensVerifiedBy: null } : {}),
+        version: sql`${menuItem.version} + 1`,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(menuItem.id, parsedId))
       .returning();
-    if (!row) return whyNoMatch(tx, parsedId);
     log.info("menu.item_updated", { itemId: row.id, by: actor.id });
-    return row;
+    return { ...row, allergensCheck: verificationStatus(row.allergensVerifiedAt) };
   });
 }
 
 /** DELETE archives: the item leaves the public menu but stays for order lines and the allergen log. Idempotent. */
 export async function archiveItem(actor: Actor, itemId: string) {
   assertStaff(actor);
-  const parsedId = id.parse(itemId);
+  const parsedId = parseId(itemId);
   return menuWrite(actor, async (tx) => {
     const { menuItem } = schema;
     const [row] = await tx
@@ -295,7 +303,7 @@ export async function archiveItem(actor: Actor, itemId: string) {
  */
 export async function setAllergens(actor: Actor, itemId: string, input: unknown) {
   assertStaff(actor);
-  const parsedId = id.parse(itemId);
+  const parsedId = parseId(itemId);
   const data = allergenInput.parse(input);
   return menuWrite(actor, async (tx) => {
     const { menuItem, menuItemAllergen, allergenChange } = schema;
@@ -322,7 +330,7 @@ export async function setAllergens(actor: Actor, itemId: string, input: unknown)
 /** Idempotent set (not a toggle), so two staff members can't undo each other by accident. Doesn't bump `version`. */
 export async function setSoldOut(actor: Actor, itemId: string, input: unknown) {
   assertStaff(actor);
-  const parsedId = id.parse(itemId);
+  const parsedId = parseId(itemId);
   const { soldOut } = soldOutInput.parse(input);
   return menuWrite(actor, async (tx) => {
     const [row] = await tx

@@ -26,6 +26,19 @@ const schema = z.object({
   AI_EMBED_MODEL: z.string().optional(),
   // Provider call timeout. 20 s keeps AI calls inside Lambda's 29 s limit (route maxDuration is 25 s).
   AI_TIMEOUT_MS: z.coerce.number().int().positive().max(22000).default(20000),
+  // The restaurant's day (daily order numbers, order.day, admin counts) rolls over at midnight here, so numbering
+  // doesn't reset mid-dinner. Any IANA zone name.
+  RESTAURANT_TZ: z
+    .string()
+    .default("America/Chicago")
+    .refine((tz) => {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: tz });
+        return true;
+      } catch {
+        return false;
+      }
+    }, "RESTAURANT_TZ must be an IANA time zone such as America/Chicago"),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 

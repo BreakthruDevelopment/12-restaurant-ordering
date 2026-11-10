@@ -251,6 +251,39 @@ describe.skipIf(!url)("menu data layer (Postgres)", () => {
       await expect(menu.createItem(staff, { ...base, priceCents: 0 })).resolves.toBeTruthy();
     });
 
+    it("a malformed item or category id is 404 (not 400) in every menu write", async () => {
+      for (const bad of ["nope", "123", "", "00000000-0000-0000-0000-00000000000g"]) {
+        await expect(menu.updateItem(staff, bad, { version: 1, name: "x" })).rejects.toMatchObject({ status: 404 });
+        await expect(menu.archiveItem(staff, bad)).rejects.toMatchObject({ status: 404 });
+        await expect(menu.setAllergens(staff, bad, { version: 1, verified: true, allergens: [] })).rejects.toMatchObject({ status: 404 });
+        await expect(menu.setSoldOut(staff, bad, { soldOut: true })).rejects.toMatchObject({ status: 404 });
+        await expect(menu.updateCategory(staff, bad, { name: "x" })).rejects.toMatchObject({ status: 404 });
+        await expect(menu.deleteCategory(staff, bad)).rejects.toMatchObject({ status: 404 });
+        await expect(menu.getMenuItemForStaff(staff, bad)).rejects.toMatchObject({ status: 404 });
+      }
+      // A bad body is still a 400.
+      await expect(menu.updateItem(staff, item.id, { version: "x" })).rejects.toMatchObject({ name: "ZodError" });
+    });
+
+    it("changing a dish's name or description clears its allergen verification; price and tag edits keep it", async () => {
+      const made = await menu.createItem(staff, { categoryId: seeded.categoryId, name: "Recipe", description: "Original", priceCents: 500 });
+      await declare(staff, made.id, [{ allergen: "soy", level: "contains" }]);
+      const verified = await menu.getMenuItemForStaff(staff, made.id);
+      expect(verified.allergensCheck).toBe("current");
+      const afterPrice = await menu.updateItem(staff, made.id, { version: verified.version, priceCents: 600, dietaryTags: ["vegan"], name: "Recipe", description: "Original" });
+      expect(afterPrice.allergensVerifiedAt).not.toBeNull(); // same name and description: not a recipe change
+      const afterName = await menu.updateItem(staff, made.id, { version: afterPrice.version, name: "Recipe with peanut sauce" });
+      expect(afterName).toMatchObject({ allergensVerifiedAt: null, allergensVerifiedBy: null, allergensCheck: "never" });
+      // The declarations themselves stay, so staff can re-confirm them; the public menu now says "not checked".
+      expect((await menu.getMenuItemForStaff(staff, made.id)).allergens).toEqual([{ allergen: "soy", level: "contains" }]);
+      const pub = (await menu.getPublicMenu()).categories.flatMap((c) => c.items).find((i) => i.id === made.id)!;
+      expect(pub.allergensCheck).toBe("never");
+      // Re-verifying restores it, and a description change clears it again.
+      await declare(staff, made.id, [{ allergen: "soy", level: "contains" }]);
+      const cur = await version(made.id);
+      expect((await menu.updateItem(staff, made.id, { version: cur, description: "Now with sesame" })).allergensCheck).toBe("never");
+    });
+
     it("sold-out is set, not toggled, and is staff only", async () => {
       await menu.setSoldOut(staff, seeded.soup.id, { soldOut: true });
       await menu.setSoldOut(staff2, seeded.soup.id, { soldOut: true });

@@ -76,13 +76,13 @@ describe.skipIf(!url)("demo restaurant loader (Postgres)", () => {
 
   it("creates orders across every state, exactly one with an allergy alert, still unacknowledged", async () => {
     await load();
-    const rows = await sql`select status, allergy_alert, allergy_ack_at, number, subtotal_cents, version from "order" order by created_at`;
+    const rows = await sql`select status, allergy_alert, allergy_ack_at, number, day::text as day, subtotal_cents, version from "order" order by created_at`;
     expect(rows).toHaveLength(8);
     expect(new Set(rows.map((r) => r.status))).toEqual(new Set(["placed", "accepted", "preparing", "ready", "picked_up", "cancelled"]));
     const alerts = rows.filter((r) => r.allergy_alert);
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ status: "placed", allergy_ack_at: null });
-    expect(new Set(rows.map((r) => r.number)).size).toBe(8);
+    expect(new Set(rows.map((r) => `${r.day} ${r.number}`)).size).toBe(8);
     // Totals are integer cents and agree with the line snapshots.
     const sums = await sql`select o.id, o.subtotal_cents, sum(l.unit_price_cents * l.qty)::int as s from "order" o join order_line l on l.order_id = o.id group by o.id`;
     for (const r of sums) expect(r.subtotal_cents).toBe(r.s);
@@ -91,6 +91,49 @@ describe.skipIf(!url)("demo restaurant loader (Postgres)", () => {
     const [alert] = await sql`select id, version from "order" where allergy_alert`;
     const staffUser = { id: (await sql`select id from "user" where email = 'avery.staff@demo.breakthru.test'`)[0].id as string, role: "staff" as const };
     await expect(orders.transitionOrder(staffUser, alert.id, { to: "accepted", version: alert.version })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("gives each demo order the restaurant day it was placed on, and numbers it within that day", async () => {
+    const now = new Date();
+    await demo.loadDemoRestaurant(admin, { mode: "admin" }, now);
+    const { restaurantDay } = await import("@/lib/restaurant-time");
+    const rows = await sql`select day::text as day, number, created_at from "order"`;
+    for (const r of rows) expect(r.day).toBe(restaurantDay(r.created_at));
+    const days = new Set(rows.map((r) => r.day));
+    expect(days.size).toBe(2); // the 26-hour-old order is on the previous day
+    // Numbers restart at A-001 each day and are gapless within it.
+    for (const day of days) {
+      const nums = rows.filter((r) => r.day === day).map((r) => Number(r.number.slice(2))).sort((a, b) => a - b);
+      expect(nums[nums.length - 1] - nums[0]).toBe(nums.length - 1);
+    }
+    const { adminStats } = await import("@/lib/admin-stats");
+    const stats = await adminStats(admin);
+    expect(stats.ordersByDay).toHaveLength(2);
+    expect(stats.ordersByDay.reduce((n, d) => n + d.total, 0)).toBe(8);
+  });
+
+  it("attributes declarations and verification stamps to the administrator who loaded it, not to a demo staff member", async () => {
+    await load();
+    const staffIds = (await sql`select id from "user" where role = 'staff' and email like '%@demo.breakthru.test'`).map((r) => r.id);
+    expect(staffIds).toHaveLength(2);
+    const actors = (await sql`select distinct actor_id from allergen_change`).map((r) => r.actor_id);
+    expect(actors).toEqual([admin.id]);
+    const stamps = (await sql`select distinct allergens_verified_by from menu_item where allergens_verified_at is not null`).map((r) => r.allergens_verified_by);
+    expect(stamps).toEqual([admin.id]);
+    // The trusted CLI actor isn't an account: the change log names it and the stamp keeps no reviewer.
+    cliEnv();
+    try {
+      await demo.loadDemoRestaurant({ id: "demo-seed-cli", role: "admin" }, { mode: "cli" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect((await sql`select count(*)::int as n from menu_item where allergens_verified_at is not null and allergens_verified_by is null`)[0].n).toBe(22);
+  });
+
+  it("never changes whether ordering is open", async () => {
+    await sql`update restaurant_setting set accepting_orders = false, pickup_minutes = 55`;
+    await load();
+    expect((await sql`select accepting_orders, pickup_minutes from restaurant_setting`)[0]).toEqual({ accepting_orders: false, pickup_minutes: 55 });
   });
 
   it("only an administrator can load it: staff and customers get 403", async () => {
@@ -122,7 +165,7 @@ describe.skipIf(!url)("demo restaurant loader (Postgres)", () => {
     const [cat] = await sql`insert into menu_category (name, position) values ('Real category', 99) returning id`;
     const [real] = await sql`insert into menu_item (category_id, name, price_cents) values (${cat.id}, 'Real dish', 777) returning id, version`;
     await insertUsers(sql, [{ id: "dm-real-customer", role: "user" }]);
-    await sql`insert into "order" (number, customer_id, pickup_name, subtotal_cents, idempotency_key, ready_estimate_at) values ('R-1', 'dm-real-customer', 'Real', 777, gen_random_uuid(), now())`;
+    await sql`insert into "order" (number, customer_id, pickup_name, subtotal_cents, idempotency_key, request_hash, ready_estimate_at) values ('R-1', 'dm-real-customer', 'Real', 777, gen_random_uuid(), 'x', now())`;
     await sql`update menu_item set price_cents = 1 where name = 'Pad Thai'`;
     await load();
     expect((await sql`select price_cents from menu_item where name = 'Pad Thai'`)[0].price_cents).toBe(1450);

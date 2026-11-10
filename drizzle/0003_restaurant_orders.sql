@@ -66,6 +66,7 @@ CREATE TABLE "order" (
 	"allergy_ack_at" timestamp with time zone,
 	"subtotal_cents" integer NOT NULL,
 	"idempotency_key" uuid NOT NULL,
+	"request_hash" text NOT NULL,
 	"cancel_reason" text,
 	"ready_estimate_at" timestamp with time zone NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
@@ -79,6 +80,7 @@ CREATE TABLE "order" (
 	CONSTRAINT "order_allergens_chk" CHECK ("order"."allergy_allergens" <@ array['milk', 'egg', 'fish', 'crustacean_shellfish', 'tree_nuts', 'peanuts', 'wheat', 'soy', 'sesame', 'gluten']::text[]),
 	CONSTRAINT "order_allergy_shape_chk" CHECK (("order"."allergy_alert" and (cardinality("order"."allergy_allergens") > 0 or char_length("order"."allergy_note") > 0)) or (not "order"."allergy_alert" and cardinality("order"."allergy_allergens") = 0 and "order"."allergy_note" = '')),
 	CONSTRAINT "order_ack_shape_chk" CHECK (("order"."allergy_ack_at" is null or "order"."allergy_alert")),
+	CONSTRAINT "order_alert_ack_chk" CHECK ((not "order"."allergy_alert" or "order"."allergy_ack_at" is not null or "order"."status" in ('placed', 'cancelled'))),
 	CONSTRAINT "order_confirmed_shape_chk" CHECK ((not "order"."allergy_customer_confirmed" or "order"."allergy_alert")),
 	CONSTRAINT "order_cancel_reason_chk" CHECK ("order"."cancel_reason" is null or char_length("order"."cancel_reason") <= 200)
 );
@@ -150,6 +152,7 @@ BEGIN
      OR NEW.day IS DISTINCT FROM OLD.day
      OR NEW.customer_id IS DISTINCT FROM OLD.customer_id
      OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+     OR NEW.request_hash IS DISTINCT FROM OLD.request_hash
      OR NEW.subtotal_cents IS DISTINCT FROM OLD.subtotal_cents
      OR NEW.created_at IS DISTINCT FROM OLD.created_at
      OR NEW.allergy_alert IS DISTINCT FROM OLD.allergy_alert
@@ -164,11 +167,23 @@ BEGIN
        OR (NEW.allergy_ack_by IS NOT NULL AND NEW.allergy_ack_by IS DISTINCT FROM OLD.allergy_ack_by)) THEN
     RAISE EXCEPTION 'allergy acknowledgment cannot be changed' USING ERRCODE = '55000';
   END IF;
-  IF OLD.status IN ('picked_up', 'cancelled') AND NEW.status IS DISTINCT FROM OLD.status THEN
-    RAISE EXCEPTION 'order is in a final state' USING ERRCODE = '55000';
+  -- A first acknowledgment names a reviewer and happens while the order is still waiting for the kitchen.
+  IF OLD.allergy_ack_at IS NULL AND NEW.allergy_ack_at IS NOT NULL AND (NEW.allergy_ack_by IS NULL OR OLD.status <> 'placed') THEN
+    RAISE EXCEPTION 'allergy acknowledgment needs a reviewer and a placed order' USING ERRCODE = '55000';
   END IF;
-  IF NEW.status IS DISTINCT FROM OLD.status AND NEW.status <> 'cancelled' AND NEW.allergy_alert AND NEW.allergy_ack_at IS NULL THEN
-    RAISE EXCEPTION 'allergy alert not acknowledged' USING ERRCODE = '55000';
+  IF NEW.status IS DISTINCT FROM OLD.status THEN
+    -- Only the forward chain, or cancel from an open state. Final states stay final.
+    IF NOT (
+         (OLD.status = 'placed' AND NEW.status = 'accepted')
+      OR (OLD.status = 'accepted' AND NEW.status = 'preparing')
+      OR (OLD.status = 'preparing' AND NEW.status = 'ready')
+      OR (OLD.status = 'ready' AND NEW.status = 'picked_up')
+      OR (OLD.status IN ('placed', 'accepted', 'preparing', 'ready') AND NEW.status = 'cancelled')) THEN
+      RAISE EXCEPTION 'illegal order status change' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.status <> 'cancelled' AND NEW.allergy_alert AND NEW.allergy_ack_at IS NULL THEN
+      RAISE EXCEPTION 'allergy alert not acknowledged' USING ERRCODE = '55000';
+    END IF;
   END IF;
   RETURN NEW;
 END
