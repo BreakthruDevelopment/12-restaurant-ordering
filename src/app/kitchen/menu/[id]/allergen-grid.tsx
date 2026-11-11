@@ -39,6 +39,8 @@ export function AllergenGrid({ itemId, version, declared }: { itemId: string; ve
     setPending(false);
     if (!result.ok) {
       setError(result.error);
+      // Any failure clears the tick: the declarations must be checked again before a retry.
+      setVerified(false);
       if (result.status === 409) router.refresh();
       return;
     }

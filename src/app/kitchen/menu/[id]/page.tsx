@@ -47,7 +47,9 @@ export default async function MenuItemPage({ params }: PageProps<"/kitchen/menu/
         {archived ? (
           <p className="text-sm text-muted">Archived dishes can&apos;t be changed.</p>
         ) : (
-          <AllergenGrid itemId={item.id} version={item.version} declared={item.allergens} />
+          // key: a newer version (another staff member's save, picked up by router.refresh() after a 409) remounts the
+          // grid with the fresh declarations, so a retry can never write the stale ones back.
+          <AllergenGrid key={item.version} itemId={item.id} version={item.version} declared={item.allergens} />
         )}
       </Panel>
       {!archived && (
