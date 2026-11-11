@@ -36,7 +36,9 @@ track them; the kitchen works a board; allergen information is handled with liab
   list, which apply the normal access rules. Customers receive their own orders, staff receive every order, admins
   get 404. Caps are 3 streams per user and 100 open streams, then 429. A comment heartbeat goes out every 25s, and
   each stream closes after 10 minutes so the reconnect checks the session again. `useOrderEvents()` polls every 5s
-  after two stream errors; the kitchen board also refetches every 15s while the stream is up (`backstop`).
+  after two stream errors, or at once when the browser closes the stream (a 401, 404 or 429); the kitchen board also refetches every 15s while the stream is up (`backstop`).
+  Threat note: the 100-stream global cap can be exhausted by many free accounts; clients that get 429 then fall back
+  to polling every 5s, so status still updates but with more load and delay.
   The bus is in-process, which matches the one container on Oracle. With more than one instance, replace it with
   Postgres `LISTEN/NOTIFY`; the event shape stays the same.
 - **Demo:** "Demo Noodle Bar" (24 dishes, 3 customers, 2 staff, 1 admin, orders in every state, one with an

@@ -5,6 +5,8 @@ class FakeEventSource extends EventTarget {
   static latest: FakeEventSource | undefined;
   readonly url: string;
   closed = false;
+  /** 0 connecting (the browser is retrying), 2 closed (a non-200 reply: it will not retry). */
+  readyState = 0;
   constructor(url: string) {
     super();
     this.url = url;
@@ -77,6 +79,18 @@ describe("startOrderEventSubscription", () => {
     sub.stop();
     vi.advanceTimersByTime(15_000);
     expect(sub.polls).toEqual([1, 2]);
+  });
+
+  it("polls at once when the browser closes the stream after one error (401, 404 or 429)", () => {
+    vi.useFakeTimers();
+    const sub = start();
+    sub.source!.readyState = 2;
+    sub.source?.send("error");
+    expect(sub.modes).toEqual(["polling"]);
+    expect(sub.source?.closed).toBe(true);
+    vi.advanceTimersByTime(5_000);
+    expect(sub.polls).toEqual([1]);
+    sub.stop();
   });
 
   it("refetches every 15s while the kitchen stream is up, then every 5s once it gives up", () => {

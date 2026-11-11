@@ -35,6 +35,8 @@ export type OrderEventSource = {
   removeEventListener(type: "message", listener: (ev: Event) => void): void;
   removeEventListener(type: "error", listener: (ev: Event) => void): void;
   removeEventListener(type: "open", listener: (ev: Event) => void): void;
+  /** 0 connecting, 1 open, 2 closed. A closed source will not reconnect on its own. */
+  readonly readyState: number;
   close(): void;
 };
 
@@ -122,7 +124,8 @@ export function startOrderEventSubscription(deps: OrderEventSubscription): () =>
   const onError = () => {
     if (gaveUp) return;
     errors += 1;
-    if (errors >= ORDER_EVENT_ERRORS_BEFORE_POLL) {
+    // A non-200 reply (401, 404, 429) fires one error and closes the source for good, so do not wait for a second.
+    if (source?.readyState === 2 || errors >= ORDER_EVENT_ERRORS_BEFORE_POLL) {
       gaveUp = true;
       startPolling();
     }
