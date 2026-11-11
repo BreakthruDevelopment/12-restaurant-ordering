@@ -12,6 +12,11 @@
 # allergen mode with the fixed notice and no safety claim, a general question answered.
 # Live stream (always): anonymous 401, no-buffering headers, a 4th stream is 429, A's event is `{orderId, version}`
 # only, B's stream stays quiet, and staff (when seeded) also see A's event.
+# Pages (issue 12.4, always): the menu renders at / and /menu; signed out, every customer, kitchen and admin page
+# redirects to sign-in; A sees the cart, checkout, their order list and the live tracker; B gets 404 on A's tracker; a
+# customer asking for the kitchen is sent home. With staff: the menu shows allergen chips, the kitchen board shows the
+# red allergy band with the acknowledgment button, the menu editor and allergen grid render, and staff can't open
+# customer or admin pages.
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
@@ -62,6 +67,12 @@ expect() { # expect STATUS WHAT
 # json 'expression on j': print a value from $BODY.
 json() { node -e 'const j = JSON.parse(process.argv[1]); const v = eval(process.argv[2]); console.log(v === undefined ? "" : v)' "$BODY" "$1"; }
 uuid() { node -e 'console.log(crypto.randomUUID())'; }
+# page JAR PATH: GET a page without following redirects; sets STATUS, BODY and LOCATION.
+page() {
+  local out
+  out=$(curl -s -o "$OUT" -w '%{http_code} %{redirect_url}' -b "$1" "$BASE_URL$2") || fail "GET $2: curl failed"
+  STATUS=${out%% *}; LOCATION=${out#* }; BODY=$(cat "$OUT")
+}
 
 health=$(curl -fsS "$BASE_URL/api/health") || fail "health endpoint unreachable"
 echo "$health" | grep -q '"status":"ok"' || fail "health not ok: $health"
@@ -78,6 +89,17 @@ for path in /dashboard /admin; do
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
 pass "signed-out dashboard and admin redirect"
+
+for path in /menu; do
+  page=$(curl -fsS "$BASE_URL$path") || fail "page $path did not render"
+  echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "page $path is missing the shared footer"
+  echo "$page" | grep -q 'This is a demo restaurant' || fail "page $path is missing the demo banner"
+done
+for path in /cart /checkout /orders "/orders/$(node -e 'console.log(crypto.randomUUID())')" /kitchen /kitchen/menu "/kitchen/menu/$(node -e 'console.log(crypto.randomUUID())')"; do
+  code=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE_URL$path")
+  case "$code" in "307 "*/sign-in) ;; *) fail "signed-out $path should redirect to /sign-in (307), got $code" ;; esac
+done
+pass "the public menu renders; signed-out cart, checkout, orders, kitchen and menu editor redirect to sign-in"
 
 # --- Public menu ------------------------------------------------------------------------------------------------
 STATUS=$(curl -s -o "$OUT" -w '%{http_code}' "$BASE_URL/api/menu"); BODY=$(cat "$OUT")
@@ -301,6 +323,26 @@ req POST "/api/orders/$OID/transition" "$JAR_A" '{"to":"accepted","version":'"$O
 expect 403 "customer accepting their own order"
 pass "B gets 404 on A's order; a customer can't accept an order"
 
+req GET "/api/orders/$OID" "$JAR_A"; ONUM=$(json 'j.order.number')
+for path in /menu /cart /checkout /orders; do
+  page "$JAR_A" "$path"
+  [ "$STATUS" = "200" ] || fail "customer page $path: expected 200, got $STATUS"
+done
+page "$JAR_A" /orders
+echo "$BODY" | grep -q "$ONUM" || fail "A's order list is missing $ONUM"
+page "$JAR_A" "/orders/$OID"
+[ "$STATUS" = "200" ] || fail "A's tracker: expected 200, got $STATUS"
+echo "$BODY" | grep -q "Order $ONUM" || fail "A's tracker is missing the order number"
+echo "$BODY" | grep -q 'Order progress' || fail "A's tracker is missing the stepper"
+page "$JAR_B" "/orders/$OID"
+[ "$STATUS" = "404" ] || fail "B opening A's tracker: expected 404, got $STATUS"
+echo "$BODY" | grep -q "$ONUM" && fail "B's 404 page leaks A's order number"
+for path in /kitchen /kitchen/menu /admin; do
+  page "$JAR_A" "$path"
+  [ "$STATUS" = "307" ] && [ "${LOCATION%/menu}" != "$LOCATION" ] || fail "customer opening $path should be sent to /menu, got $STATUS $LOCATION"
+done
+pass "pages: A sees the cart, checkout, order list and tracker; B gets 404 on A's tracker; customers are kept out of the kitchen"
+
 if [ "$HAVE_STAFF" = yes ]; then
   # --- The allergy flow --------------------------------------------------------------------------------------------------
   AKEY=$(uuid)
@@ -313,6 +355,14 @@ if [ "$HAVE_STAFF" = yes ]; then
   AID=$(json 'j.order.id'); AVER=$(json 'j.order.version'); CLEANUP_ORDERS+=("$AID")
   [ "$(json 'j.order.allergy.alert')" = "true" ] || fail "allergy alert missing: $BODY"
   pass "the allergy question: matching dish refused until B confirms, then the alert is stored"
+
+  page "$JAR_S" /kitchen
+  [ "$STATUS" = "200" ] || fail "kitchen board: expected 200, got $STATUS"
+  echo "$BODY" | grep -q 'Allergy alert' || fail "kitchen board is missing the allergy band"
+  echo "$BODY" | grep -q 'Allergy reviewed with kitchen' || fail "kitchen board is missing the acknowledgment button"
+  page "$JAR_B" "/orders/$AID"
+  echo "$BODY" | grep -q 'Staff will confirm your allergy before we start' || fail "B's tracker is missing the allergy notice"
+  pass "pages: the kitchen board shows the allergy band and the acknowledgment button; B's tracker says staff will confirm"
 
   req POST "/api/orders/$AID/transition" "$JAR_S" '{"to":"accepted","version":'"$AVER"'}'
   expect 409 "accepting an unacknowledged allergy alert"
@@ -329,6 +379,23 @@ if [ "$HAVE_STAFF" = yes ]; then
   expect 200 "staff cancelling the smoke allergy order"
   req POST "/api/orders/$OID/transition" "$JAR_S" '{"to":"cancelled","version":'"$OVER"',"reason":"smoke test cleanup"}'
   expect 200 "staff cancelling the smoke order"
+
+  page "$JAR_S" /menu
+  echo "$BODY" | grep -q 'Contains peanuts' || fail "the menu is missing the smoke dish's allergen chip"
+  page "$JAR_S" /kitchen/menu
+  [ "$STATUS" = "200" ] || fail "menu editor: expected 200, got $STATUS"
+  echo "$BODY" | grep -q "Smoke peanut noodles $RUN_ID" || fail "menu editor is missing the smoke dish"
+  page "$JAR_S" "/kitchen/menu/$ITEM"
+  [ "$STATUS" = "200" ] || fail "item editor: expected 200, got $STATUS"
+  echo "$BODY" | grep -q 'I checked these against the recipe' || fail "item editor is missing the verification tick"
+  echo "$BODY" | grep -q 'Allergen change log' || fail "item editor is missing the change log"
+  page "$JAR_S" "/kitchen/menu/$(uuid)"
+  [ "$STATUS" = "404" ] || fail "unknown item in the editor: expected 404, got $STATUS"
+  for path in /cart /orders /admin; do
+    page "$JAR_S" "$path"
+    [ "$STATUS" = "307" ] && [ "${LOCATION%/kitchen}" != "$LOCATION" ] || fail "staff opening $path should be sent to /kitchen, got $STATUS $LOCATION"
+  done
+  pass "pages: the menu shows allergen chips; the menu editor, allergen grid and change log render; staff are kept out of customer and admin pages"
 else
   req POST "/api/orders/$OID/transition" "$JAR_A" '{"to":"cancelled","version":'"$OVER"'}'
   expect 200 "customer cancelling while placed"
