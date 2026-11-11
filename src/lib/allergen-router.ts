@@ -262,12 +262,17 @@ const STOPWORDS = new Set(
     "one ones more most much many very really so too just also about around up down out over than then if else now today tonight right yes yeah yep s t u").split(" "),
 );
 
-/** The fixed general vocabulary: what a menu question for suggestions or wait times may be about. Anything else goes to ask-staff. */
+/**
+ * The fixed general vocabulary: what a menu question for suggestions, what people order, what comes with a dish, or wait
+ * times may be about. Anything else goes to ask-staff. Words are added only when they are plainly not about allergens,
+ * diets or safety; "eat", "have", "contain", "free" and the like stay out, and the lexicon wins over this list anyway.
+ */
 const GENERAL_VOCAB = new Set(
   ("popular popularity best top favourite favorite favourites favorites recommend recommended recommendation recommendations suggest suggestion suggestions special specials " +
     "spicy spice spices hot mild milder cheap cheaper cheapest budget affordable under below price prices cost costs expensive quick quickly fast faster kid kids child children friendly share sharing shareable " +
     "dessert desserts sweet sweets drink drinks beverage beverages tea coffee starter starters appetizer appetizers main mains entree entrees side sides soup soups noodle noodles rice bowl bowls salad salads " +
     "lunch dinner meal meals dish dishes menu food light filling big small portion portions good great nice tasty delicious try order ordering " +
+    "people usually usual typically typical commonly common often frequently customers customer guests everyone regulars ordered come comes coming " +
     "seller sellers todays wait waiting long ready pickup pick open opening hours close closing closes when time times minutes minute lighter").split(" "),
 );
 /** Only real time wording: "pick", "pickup", "sellers", "specials" and the like are recommendation words, not time words. */

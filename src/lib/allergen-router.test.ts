@@ -101,13 +101,14 @@ const GENERAL_PHRASINGS: string[] = [
   "What's spicy?", "Anything spicy under $15?", "What are your most popular dishes?", "How long is pickup?", "What drinks do you have?", "Which dessert is the best?",
   "What's the cheapest main?", "Do you have something light?", "Recommend a starter", "What's the wait right now?", "What time do you open?", "Tell me about the soup",
   "Is the soup popular?", "What's the best seller?", "what do you recommend", "something cheap and quick", "kid friendly?", "what's good for kids", "what's sweet?",
-  "What are today's specials?", "cheapest dessert under $8", "what's the price of the pad thai", "which noodles are popular", "what's good to share",
+  "What are today's specials?", "What do people usually order?", "What do people usually order here?", "What comes with the pad thai?", "which bowls come with rice",
+  "what do customers order most", "what's most commonly ordered", "cheapest dessert under $8", "what's the price of the pad thai", "which noodles are popular", "what's good to share",
 ];
 
 /** Questions with a word outside the fixed general vocabulary (or the menu's dish-name words) go to the ask-staff answer. */
 const OUTSIDE_VOCABULARY: string[] = [
-  "What comes with the burger?", "How many minutes until my order is ready?", "What should I order for two people?", "Is the ramen spicy?", "Quel plat est le plus populaire ?",
-  "What's the price of the katsu curry?", "Is there anything hot and filling?", "Which bowls come with rice?", "What is a good side for the teriyaki?",
+  "What comes with the burger?", "How many minutes until my order is ready?", "What should I order for two people?", "what comes with the pizza", "Is the ramen spicy?", "Quel plat est le plus populaire ?",
+  "What's the price of the katsu curry?", "Is there anything hot and filling?", "What is a good side for the teriyaki?",
   "What's better, the ramen or the pad thai?", "what's the wifi password", "do you take reservations", "tell me a joke", "recommend something for my grandmother",
 ];
 
@@ -153,6 +154,22 @@ describe("allergen router: every question from the PR review reaches the determi
   });
   it("reads Cyrillic look-alikes as the Latin letters they imitate", () => {
     expect(routeQuestion("реаnut").allergens).toContain("peanuts");
+  });
+});
+
+describe("allergen router: general questions stay general, allergen-adjacent ones do not (#13)", () => {
+  const menuWords = menuWordsOf([...MENU_FOR_ROUTING(), { name: "Spicy Miso Ramen" }]);
+  it("sends the issue's questions to general mode", () => {
+    for (const q of ["what do people usually order?", "what comes with the ramen?", "what is spicy?"]) expect(routeQuestion(q, { menuWords }).mode, q).toBe("general");
+  });
+  it("still sends anything naming an allergen, allergy or diet term to allergen mode", () => {
+    for (const q of [
+      "what do people usually order if they have a nut allergy?", "what comes with the ramen, is it safe for me?", "what comes with the ramen without gluten",
+      "what comes with the ramen? does it contain egg", "what do people usually order that is free of dairy", "what comes with the ramen, I am vegan",
+      "do people usually order the ramen with peanuts", "what comes with the ramen? I'm intolerant", "what comes with the ramen and can I eat it",
+      "what do people with celiac usually order", "what comes with the ramen is there any shellfish in it", "what comes with the ramen vegetarian",
+      "what comes with the ramen safe for allergies", "wat comes with the ramen, any peenuts",
+    ]) expect(routeQuestion(q, { menuWords }).mode, q).toBe("allergen");
   });
 });
 
