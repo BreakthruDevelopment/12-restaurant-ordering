@@ -9,6 +9,7 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { getSettings } from "@/lib/menu";
 import { OPEN_STATUSES, type Declared, allergenConflicts, checkTransition, formatOrderNumber, requestHash, subtotalCents } from "@/lib/order-rules";
+import { enqueueOrderEvent, transactionWithOrderEvents } from "@/lib/order-tx";
 import { restaurantDayExpr } from "@/lib/restaurant-time";
 import { type Tx, advisoryLock, consumeRate } from "@/lib/usage";
 
@@ -24,6 +25,8 @@ import { type Tx, advisoryLock, consumeRate } from "@/lib/usage";
  * - Every transition carries the `version` the caller saw; the UPDATE matches on it, so two racing writers can't both win.
  * - Customers reach their own orders only; staff reach all; admins get 404 (access.ts).
  * - Logs carry ids and statuses, never allergy details, names or notes.
+ * - A change is queued inside the transaction and published on the order bus only after commit,
+ *   as `{orderId, version, customerId}`. A rollback publishes nothing. The stream decides who hears it.
  */
 
 export const ORDERS_PER_HOUR = 10;
@@ -201,7 +204,7 @@ export async function placeOrder(actor: Actor, input: unknown): Promise<{ order:
     executor.select().from(order).where(and(eq(order.customerId, actor.id), eq(order.idempotencyKey, data.idempotencyKey)));
 
   try {
-    const result = await db().transaction(async (tx) => {
+    const result = await transactionWithOrderEvents(async (tx) => {
       // One order attempt per customer at a time: retries and double taps queue here, so the second sees the first.
       await advisoryLock(tx, `order:${actor.id}`);
       const [existing] = await find(tx);
@@ -281,7 +284,10 @@ export async function placeOrder(actor: Actor, input: unknown): Promise<{ order:
           position: l.position,
         })),
       );
-      return { order: (await loadViews([row], access, tx))[0], created: true };
+      const view = (await loadViews([row], access, tx))[0];
+      // After the insert, still inside the transaction: a later throw rolls this back with the order.
+      enqueueOrderEvent(tx, { orderId: row.id, version: row.version, customerId: row.customerId });
+      return { order: view, created: true };
     });
     // After the commit, so a rolled-back order is never reported. Ids and counts only: never names, notes or allergy details.
     if (result.created) log.info("order.placed", { orderId: result.order.id, lineCount: result.order.lines.length });
@@ -354,24 +360,29 @@ export async function transitionOrder(actor: Actor, orderId: string, input: unkn
   const needsAck = data.to !== "cancelled" && row.allergyAlert && row.allergyAckAt === null;
   if (needsAck) throw new ConflictError("Review the allergy alert with the kitchen before accepting this order.");
 
-  const [updated] = await db()
-    .update(order)
-    .set({
-      status: data.to,
-      version: sql`${order.version} + 1`,
-      updatedAt: sql`now()`,
-      ...(data.to === "cancelled" ? { cancelReason: data.reason || null } : {}),
-    })
-    .where(
-      and(
-        eq(order.id, id),
-        eq(order.version, data.version),
-        eq(order.status, row.status),
-        // Re-checked in the statement itself, not just above.
-        or(not(order.allergyAlert), isNotNull(order.allergyAckAt), eq(sql`${data.to}`, "cancelled")),
-      ),
-    )
-    .returning();
+  const updated = await transactionWithOrderEvents(async (tx) => {
+    const [next] = await tx
+      .update(order)
+      .set({
+        status: data.to,
+        version: sql`${order.version} + 1`,
+        updatedAt: sql`now()`,
+        ...(data.to === "cancelled" ? { cancelReason: data.reason || null } : {}),
+      })
+      .where(
+        and(
+          eq(order.id, id),
+          eq(order.version, data.version),
+          eq(order.status, row.status),
+          // Re-checked in the statement itself, not just above.
+          or(not(order.allergyAlert), isNotNull(order.allergyAckAt), eq(sql`${data.to}`, "cancelled")),
+        ),
+      )
+      .returning();
+    if (!next) return null;
+    enqueueOrderEvent(tx, { orderId: next.id, version: next.version, customerId: next.customerId });
+    return next;
+  });
   if (!updated) throw new ConflictError("This order changed. Reload and try again.");
   log.info("order.transition", { orderId: id, from: row.status, to: data.to, by: actor.id });
   return (await loadViews([updated], access))[0];
@@ -386,11 +397,16 @@ export async function acknowledgeAllergy(actor: Actor, orderId: string): Promise
   if (access.kind !== "staff") throw new ForbiddenError("Only restaurant staff can do that.");
   const id = parseId(orderId);
   const { order } = schema;
-  const [updated] = await db()
-    .update(order)
-    .set({ allergyAckBy: actor.id, allergyAckAt: sql`now()`, version: sql`${order.version} + 1`, updatedAt: sql`now()` })
-    .where(and(eq(order.id, id), eq(order.status, "placed"), eq(order.allergyAlert, true), isNull(order.allergyAckAt)))
-    .returning();
+  const updated = await transactionWithOrderEvents(async (tx) => {
+    const [next] = await tx
+      .update(order)
+      .set({ allergyAckBy: actor.id, allergyAckAt: sql`now()`, version: sql`${order.version} + 1`, updatedAt: sql`now()` })
+      .where(and(eq(order.id, id), eq(order.status, "placed"), eq(order.allergyAlert, true), isNull(order.allergyAckAt)))
+      .returning();
+    if (!next) return null;
+    enqueueOrderEvent(tx, { orderId: next.id, version: next.version, customerId: next.customerId });
+    return next;
+  });
   if (updated) return (await loadViews([updated], access))[0];
 
   const [row] = await db().select().from(order).where(eq(order.id, id));

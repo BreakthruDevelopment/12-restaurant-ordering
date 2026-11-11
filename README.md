@@ -30,10 +30,19 @@ track them; the kitchen works a board; allergen information is handled with liab
   `RESTAURANT_TZ` (default `America/Chicago`), so numbering doesn't reset mid-dinner.
 - **Idempotency:** a retry with the same `idempotencyKey` and the same order returns the first order; the same key
   with a different order (an allergy added on the retry, say) is `409 idempotency_key_reused`.
+- **Live status:** `GET /api/orders/stream` is Server-Sent Events. A committed place, transition or allergy
+  acknowledgment is published only after the database transaction commits. Each event is `{orderId, version}`
+  and nothing else (no allergy details, names or notes); the page refetches `GET /api/orders/[id]` or the kitchen
+  list, which apply the normal access rules. Customers receive their own orders, staff receive every order, admins
+  get 404. Caps are 3 streams per user and 100 open streams, then 429. A comment heartbeat goes out every 25s, and
+  each stream closes after 10 minutes so the reconnect checks the session again. `useOrderEvents()` polls every 5s
+  after two stream errors; the kitchen board also refetches every 15s while the stream is up (`backstop`).
+  The bus is in-process, which matches the one container on Oracle. With more than one instance, replace it with
+  Postgres `LISTEN/NOTIFY`; the event shape stays the same.
 - **Demo:** "Demo Noodle Bar" (24 dishes, 3 customers, 2 staff, 1 admin, orders in every state, one with an
   allergy alert): the admin button, or `scripts/seed-demo.mts` locally.
-- **Status:** this is the data and API layer (issue 12.1). The live status stream (12.2), the menu assistant (12.3)
-  and the pages (12.4) follow.
+- **Status:** the data, API and live status stream are in (issues 12.1–12.3, including the menu assistant). The
+  pages (12.4) follow.
 
 ## Architecture
 
