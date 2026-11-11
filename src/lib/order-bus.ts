@@ -18,9 +18,16 @@ export const ORDER_STREAMS_TOTAL = 100;
 
 type Listener = (event: OrderBusEvent) => void;
 
-const listeners = new Set<Listener>();
-const perUser = new Map<string, number>();
-let total = 0;
+/**
+ * The bus state lives on `globalThis`, not in module scope. Next.js bundles route handlers (the SSE stream) and pages
+ * with their server actions (the kitchen board, checkout, the tracker's cancel) separately, so each bundle gets its own
+ * copy of this module; module-level state would give each its own bus, and a change made through a server action would
+ * never reach a stream. One process, one bus.
+ */
+type BusState = { listeners: Set<Listener>; perUser: Map<string, number>; total: number };
+const BUS_KEY = Symbol.for("restaurant-ordering.order-bus");
+const state: BusState = ((globalThis as { [BUS_KEY]?: BusState })[BUS_KEY] ??= { listeners: new Set(), perUser: new Map(), total: 0 });
+const { listeners, perUser } = state;
 
 function clean(event: OrderBusEvent): OrderBusEvent {
   return { orderId: event.orderId, version: event.version, customerId: event.customerId };
@@ -50,23 +57,23 @@ export const orderBus = {
    */
   tryAcquire(userId: string): boolean {
     const mine = perUser.get(userId) ?? 0;
-    if (mine >= ORDER_STREAMS_PER_USER || total >= ORDER_STREAMS_TOTAL) return false;
+    if (mine >= ORDER_STREAMS_PER_USER || state.total >= ORDER_STREAMS_TOTAL) return false;
     perUser.set(userId, mine + 1);
-    total += 1;
+    state.total += 1;
     return true;
   },
 
   /** Give a slot back. Extra releases (a double cancel) do not drive the count negative. */
   release(userId: string): void {
     const mine = perUser.get(userId) ?? 0;
-    if (mine <= 0 || total <= 0) return;
-    total -= 1;
+    if (mine <= 0 || state.total <= 0) return;
+    state.total -= 1;
     if (mine === 1) perUser.delete(userId);
     else perUser.set(userId, mine - 1);
   },
 
   total(): number {
-    return total;
+    return state.total;
   },
 
   countFor(userId: string): number {
@@ -77,6 +84,6 @@ export const orderBus = {
   resetForTests(): void {
     listeners.clear();
     perUser.clear();
-    total = 0;
+    state.total = 0;
   },
 };

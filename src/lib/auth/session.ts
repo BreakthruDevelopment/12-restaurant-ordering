@@ -35,12 +35,11 @@ export async function requireRoleOrRedirect(role: Role): Promise<CurrentUser> {
 }
 
 /**
- * Where each role lands after sign-in and when it asks for a page that isn't its own. Every role except admin goes
- * to /dashboard until the customer pages and the kitchen board exist (issue 12.4); /dashboard will then redirect
- * there. Admins keep /admin.
+ * Where each role lands after sign-in and when it asks for a page that isn't its own: customers go to the menu, staff to
+ * the kitchen board, admins to the counts. Admin is not a superset of staff, so an admin asking for /kitchen lands on /admin.
  */
 export function homeFor(role: Role): string {
-  return role === "admin" ? "/admin" : "/dashboard";
+  return role === "admin" ? "/admin" : role === "staff" ? "/kitchen" : "/menu";
 }
 
 /** For route handlers and server actions: throw, so the caller maps it to 401/403. */

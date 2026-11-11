@@ -47,3 +47,22 @@ describe("orderBus", () => {
     expect(spy).toHaveBeenCalled();
   });
 });
+
+describe("one bus per process", () => {
+  it("a second copy of the module (another Next.js bundle) shares listeners and stream counts", async () => {
+    const first = (await import("./order-bus")).orderBus;
+    vi.resetModules();
+    const second = (await import("./order-bus")).orderBus;
+    expect(second).not.toBe(first);
+    first.resetForTests();
+    const heard: unknown[] = [];
+    const off = first.subscribe((e) => heard.push(e));
+    second.publish({ orderId: "o1", version: 2, customerId: "c1" });
+    expect(heard).toEqual([{ orderId: "o1", version: 2, customerId: "c1" }]);
+    expect(second.tryAcquire("u1")).toBe(true);
+    expect(first.countFor("u1")).toBe(1);
+    expect(first.total()).toBe(1);
+    off();
+    first.resetForTests();
+  });
+});
