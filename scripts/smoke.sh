@@ -9,13 +9,16 @@
 # confirmation at checkout, an allergy-alert order can't be accepted before the acknowledgment (409), the staff
 # acknowledge, then accept; the allergen PUT needs verified: true.
 # Menu assistant (always): sign-in and same-origin required, the 300-character cap, an allergen question answered in
-# allergen mode with the fixed notice and no safety claim, a general question answered. Not covered yet: A's live stream
-# (issue 12.2), which adds its own checks.
+# allergen mode with the fixed notice and no safety claim, a general question answered.
+# Live stream (always): anonymous 401, no-buffering headers, a 4th stream is 429, A's event is `{orderId, version}`
+# only, B's stream stays quiet, and staff (when seeded) also see A's event.
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
 RUN_ID="$(date +%s)$RANDOM"
 JAR_A="$(mktemp)"; JAR_B="$(mktemp)"; JAR_C="$(mktemp)"; JAR_S="$(mktemp)"; OUT="$(mktemp)"
+STREAM_A=""; STREAM_B=""; STREAM_S=""; HOLD1=""; HOLD2=""; HOLD3=""; HDR=""
+STREAM_PIDS=()
 CLEANUP_ITEMS=(); CLEANUP_ORDERS=(); HAVE_STAFF=no
 # Runs on success and on failure: cancel any smoke order still open and archive the smoke dish, best effort, so a failed
 # run doesn't leave an open order or a dish on a live menu. Keeps the script's own exit code.
@@ -33,7 +36,11 @@ cleanup() {
   if [ "$HAVE_STAFF" = yes ]; then
     for id in ${CLEANUP_ITEMS[@]+"${CLEANUP_ITEMS[@]}"}; do curl -s -o /dev/null -X DELETE -b "$JAR_S" -H "origin: $BASE_URL" "$BASE_URL/api/menu/items/$id"; done
   fi
-  rm -f "$JAR_A" "$JAR_B" "$JAR_C" "$JAR_S" "$OUT"
+  if [ "${#STREAM_PIDS[@]}" -gt 0 ]; then
+    local pid
+    for pid in "${STREAM_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  fi
+  rm -f "$JAR_A" "$JAR_B" "$JAR_C" "$JAR_S" "$OUT" "$STREAM_A" "$STREAM_B" "$STREAM_S" "$HOLD1" "$HOLD2" "$HOLD3" "$HDR"
   exit $rc
 }
 trap cleanup EXIT
@@ -181,6 +188,49 @@ else
   echo "note - no SMOKE_STAFF_* set: staff steps skipped"
 fi
 
+# --- Live order stream (issue 12.2) ----------------------------------------------------------------------------------
+# Open the listeners before the order below is placed, so the commit has a stream to land on.
+HDR="$(mktemp)"; HOLD1="$(mktemp)"; HOLD2="$(mktemp)"; HOLD3="$(mktemp)"
+STREAM_A="$(mktemp)"; STREAM_B="$(mktemp)"; STREAM_S="$(mktemp)"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$BASE_URL/api/orders/stream")
+[ "$code" = "401" ] || fail "anonymous stream should be 401, got $code"
+start_stream() { # start_stream JAR OUTFILE [HEADERFILE]
+  local jar=$1 out=$2 hdr=${3-}
+  : > "$out"
+  if [ -n "$hdr" ]; then
+    curl -sN -D "$hdr" -o "$out" -b "$jar" --max-time 30 "$BASE_URL/api/orders/stream" &
+  else
+    curl -sN -o "$out" -b "$jar" --max-time 30 "$BASE_URL/api/orders/stream" &
+  fi
+  STREAM_PIDS+=("$!")
+}
+wait_open() { # wait_open FILE
+  local i
+  for i in $(seq 1 30); do
+    grep -q ": open" "$1" && return 0
+    sleep 0.2
+  done
+  return 1
+}
+start_stream "$JAR_A" "$HOLD1" "$HDR"
+start_stream "$JAR_A" "$HOLD2"
+start_stream "$JAR_A" "$HOLD3"
+wait_open "$HOLD1" && wait_open "$HOLD2" && wait_open "$HOLD3" || fail "three streams did not open (A=$(cat "$HOLD1") B=$(cat "$HOLD2") C=$(cat "$HOLD3"))"
+grep -qi '^content-type:.*text/event-stream' "$HDR" || fail "stream content-type: $(tr '\r' ' ' < "$HDR")"
+grep -qi '^cache-control:.*no-cache, no-transform' "$HDR" || fail "stream cache-control: $(tr '\r' ' ' < "$HDR")"
+grep -qi '^x-accel-buffering:.*no' "$HDR" || fail "stream X-Accel-Buffering: $(tr '\r' ' ' < "$HDR")"
+code=$(curl -s -o "$OUT" -w '%{http_code}' -b "$JAR_A" --max-time 5 "$BASE_URL/api/orders/stream")
+[ "$code" = "429" ] || fail "4th stream should be 429, got $code ($(cat "$OUT"))"
+for pid in "${STREAM_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+STREAM_PIDS=()
+sleep 0.5
+start_stream "$JAR_A" "$STREAM_A"
+start_stream "$JAR_B" "$STREAM_B"
+if [ "$HAVE_STAFF" = yes ]; then start_stream "$JAR_S" "$STREAM_S"; fi
+wait_open "$STREAM_A" && wait_open "$STREAM_B" || fail "customer streams did not open (A=$(cat "$STREAM_A") B=$(cat "$STREAM_B"))"
+if [ "$HAVE_STAFF" = yes ]; then wait_open "$STREAM_S" || fail "staff stream did not open ($(cat "$STREAM_S"))"; fi
+pass "order stream: anonymous 401, no-buffering headers, fourth stream 429"
+
 # --- Ordering: idempotency, server-side prices, privacy --------------------------------------------------------------
 ORDER='{"lines":[{"itemId":"'"$ITEM"'","qty":2,"unitPriceCents":1,"priceCents":1}],"pickupName":"Smoke","allergy":{"has":false},"subtotalCents":1,"idempotencyKey":"'"$KEY"'"}'
 req POST /api/orders "$JAR_A" "$ORDER"
@@ -188,6 +238,41 @@ expect 201 "first order"
 OID=$(json 'j.order.id'); OVER=$(json 'j.order.version'); CLEANUP_ORDERS+=("$OID")
 [ "$(json 'j.order.subtotalCents')" = "$((UNIT * 2))" ] || fail "client-sent prices must be ignored: expected $((UNIT * 2)) cents, got $BODY"
 pass "A placed an order; the total came from the menu, not from the client"
+
+found=no
+for i in $(seq 1 30); do
+  grep -q "$OID" "$STREAM_A" && found=yes && break
+  sleep 0.2
+done
+[ "$found" = yes ] || fail "A's stream missed the new order ($(cat "$STREAM_A"))"
+node -e '
+  const fs = require("fs");
+  const text = fs.readFileSync(process.argv[1], "utf8");
+  const oid = process.argv[2];
+  const data = text.split(/\r?\n/).filter((line) => line.startsWith("data: "));
+  if (data.length !== 1) { console.error("expected one data line, got " + data.length); process.exit(2); }
+  const event = JSON.parse(data[0].slice(6));
+  const keys = Object.keys(event).sort();
+  if (keys.join(",") !== "orderId,version") { console.error(keys.join(",")); process.exit(3); }
+  if (event.orderId !== oid || event.version !== 1) { console.error(JSON.stringify(event)); process.exit(4); }
+  if (text.includes("customerId") || /allerg|pickup|note/i.test(data[0])) process.exit(5);
+' "$STREAM_A" "$OID" || fail "stream event must be exactly {orderId, version}"
+sleep 0.4
+grep -q "$OID" "$STREAM_B" && fail "B's stream received A's order ($(cat "$STREAM_B"))"
+if [ "$HAVE_STAFF" = yes ]; then
+  grep -q "$OID" "$STREAM_S" || fail "staff stream missed A's order ($(cat "$STREAM_S"))"
+  node -e '
+    const fs = require("fs");
+    const text = fs.readFileSync(process.argv[1], "utf8");
+    const data = text.split(/\r?\n/).filter((line) => line.startsWith("data: "));
+    if (data.length !== 1) process.exit(2);
+    const event = JSON.parse(data[0].slice(6));
+    if (event.orderId !== process.argv[2] || event.version !== 1 || Object.keys(event).sort().join(",") !== "orderId,version") process.exit(3);
+  ' "$STREAM_S" "$OID" || fail "staff stream event must be exactly {orderId, version}"
+fi
+for pid in "${STREAM_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+STREAM_PIDS=()
+pass "A's stream got {orderId, version} only; B saw nothing"
 
 req POST /api/orders "$JAR_A" "$ORDER"
 expect 200 "same idempotency key"
