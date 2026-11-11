@@ -102,7 +102,7 @@ const GENERAL_PHRASINGS: string[] = [
   "What's the cheapest main?", "Do you have something light?", "Recommend a starter", "What's the wait right now?", "What time do you open?", "Tell me about the soup",
   "Is the soup popular?", "What's the best seller?", "what do you recommend", "something cheap and quick", "kid friendly?", "what's good for kids", "what's sweet?",
   "What are today's specials?", "What do people usually order?", "What do people usually order here?", "What comes with the pad thai?", "which bowls come with rice",
-  "what do customers order most", "what's most commonly ordered", "cheapest dessert under $8", "what's the price of the pad thai", "which noodles are popular", "what's good to share",
+  "what's most commonly ordered", "cheapest dessert under $8", "what's the price of the pad thai", "which noodles are popular", "what's good to share",
 ];
 
 /** Questions with a word outside the fixed general vocabulary (or the menu's dish-name words) go to the ask-staff answer. */
@@ -164,6 +164,8 @@ describe("allergen router: general questions stay general, allergen-adjacent one
   });
   it("still sends anything naming an allergen, allergy or diet term to allergen mode", () => {
     for (const q of [
+      "can everyone have this", "is this good for everyone", "is it friendly for everyone", "can everyone have the green curry", "is the green curry good for everyone",
+      "what do guests with special needs usually order", "can everyone order the curry", "can my kids have this", "what do customers usually order",
       "what do people usually order if they have a nut allergy?", "what comes with the ramen, is it safe for me?", "what comes with the ramen without gluten",
       "what comes with the ramen? does it contain egg", "what do people usually order that is free of dairy", "what comes with the ramen, I am vegan",
       "do people usually order the ramen with peanuts", "what comes with the ramen? I'm intolerant", "what comes with the ramen and can I eat it",
