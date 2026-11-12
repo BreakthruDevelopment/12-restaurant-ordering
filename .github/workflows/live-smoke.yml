@@ -28,8 +28,6 @@ jobs:
           dig +short CAA breakthruventures.ai; dig +short CAA app12.breakthruventures.ai
           curl -sS -m 90 'https://crt.sh/?q=app12.breakthruventures.ai&output=json' | jq -r '.[] | "\(.entry_timestamp) \(.issuer_name)"' | head -5 || true
           curl -sS -m 90 'https://crt.sh/?q=app8.breakthruventures.ai&output=json' | jq -r '.[] | "\(.entry_timestamp) \(.issuer_name)"' | head -5 || true
-      - name: Stop here (diagnostic run)
-        run: exit 1
       - name: Health
         if: ${{ hashFiles('.github/live-smoke-url') != '' }}
         run: |
