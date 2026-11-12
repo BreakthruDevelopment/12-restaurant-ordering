@@ -19,7 +19,7 @@ jobs:
       - name: Diagnose
         run: |
           ip=$(dig +short A app8.breakthruventures.ai | tail -1); echo "vm ip $ip"
-          for h in app8.breakthruventures.ai app12.breakthruventures.ai loan-portal.${ip//./-}.sslip.io restaurant-ordering.${ip//./-}.sslip.io; do
+          for h in app4.breakthruventures.ai app8.breakthruventures.ai app12.breakthruventures.ai restaurant-ordering.${ip//./-}.sslip.io nosuchapp.${ip//./-}.sslip.io; do
             echo "== $h"; dig +short A "$h"; dig +short AAAA "$h"
             curl -sS -m 20 -o /dev/null -w 'http %{http_code} -> %{redirect_url}\n' "http://$h/" || true
             curl -sS -m 20 -o /dev/null -w 'http-acme %{http_code}\n' "http://$h/.well-known/acme-challenge/probe" || true
@@ -28,6 +28,8 @@ jobs:
           dig +short CAA breakthruventures.ai; dig +short CAA app12.breakthruventures.ai
           curl -sS -m 90 'https://crt.sh/?q=app12.breakthruventures.ai&output=json' | jq -r '.[] | "\(.entry_timestamp) \(.issuer_name)"' | head -5 || true
           curl -sS -m 90 'https://crt.sh/?q=app8.breakthruventures.ai&output=json' | jq -r '.[] | "\(.entry_timestamp) \(.issuer_name)"' | head -5 || true
+      - name: Stop here (diagnostic run)
+        run: exit 1
       - name: Health
         if: ${{ hashFiles('.github/live-smoke-url') != '' }}
         run: |
