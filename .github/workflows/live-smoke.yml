@@ -16,6 +16,18 @@ jobs:
         run: |
           tok=$(curl -fsS "https://ghcr.io/token?scope=repository:breakthrudevelopment/12-restaurant-ordering:pull" | jq -r .token)
           curl -fsS -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.oci.image.index.v1+json' "https://ghcr.io/v2/breakthrudevelopment/12-restaurant-ordering/manifests/sha-cbd6f0f" | jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"'
+      - name: Diagnose
+        run: |
+          ip=$(dig +short A app8.breakthruventures.ai | tail -1); echo "vm ip $ip"
+          for h in app8.breakthruventures.ai app12.breakthruventures.ai loan-portal.${ip//./-}.sslip.io restaurant-ordering.${ip//./-}.sslip.io; do
+            echo "== $h"; dig +short A "$h"; dig +short AAAA "$h"
+            curl -sS -m 20 -o /dev/null -w 'http %{http_code} -> %{redirect_url}\n' "http://$h/" || true
+            curl -sS -m 20 -o /dev/null -w 'http-acme %{http_code}\n' "http://$h/.well-known/acme-challenge/probe" || true
+            echo | timeout 20 openssl s_client -connect "$h:443" -servername "$h" 2>&1 | grep -E 'subject=|issuer=|alert|verify return' | head -4 || true
+          done
+          dig +short CAA breakthruventures.ai; dig +short CAA app12.breakthruventures.ai
+          curl -sS -m 90 'https://crt.sh/?q=app12.breakthruventures.ai&output=json' | jq -r '.[] | "\(.entry_timestamp) \(.issuer_name)"' | head -5 || true
+          curl -sS -m 90 'https://crt.sh/?q=app8.breakthruventures.ai&output=json' | jq -r '.[] | "\(.entry_timestamp) \(.issuer_name)"' | head -5 || true
       - name: Health
         if: ${{ hashFiles('.github/live-smoke-url') != '' }}
         run: |
