@@ -94,9 +94,11 @@ describe.skipIf(!url)("demo restaurant loader (Postgres)", () => {
   });
 
   it("gives each demo order the restaurant day it was placed on, and numbers it within that day", async () => {
-    const now = new Date();
+    const { restaurantDay, restaurantNoon } = await import("@/lib/restaurant-time");
+    // Noon, not the wall clock. Between 00:00 and 02:00 Chicago the orders up to 2 hours old are still yesterday
+    // and the 26-hour-old order is the day before that, so a real clock fails the two-day check below.
+    const now = restaurantNoon(new Date());
     await demo.loadDemoRestaurant(admin, { mode: "admin" }, now);
-    const { restaurantDay } = await import("@/lib/restaurant-time");
     const rows = await sql`select day::text as day, number, created_at from "order"`;
     for (const r of rows) expect(r.day).toBe(restaurantDay(r.created_at));
     const days = new Set(rows.map((r) => r.day));
